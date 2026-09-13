@@ -1,0 +1,14 @@
+# Every path falls to the maintainers unless a more specific rule below claims it.
+*                       @r0llingp1n
+
+# Changing what the checks enforce is a change to the project's standards.
+/.github/               @r0llingp1n
+/.golangci.yml          @r0llingp1n
+/.pre-commit-config.yaml @r0llingp1n
+/scripts/               @r0llingp1n
+
+# Licensing and the agreement that lets contributions ship under both licenses.
+/LICENSE                @r0llingp1n
+/LICENSE-COMMERCIAL.md  @r0llingp1n
+/CLA.md                 @r0llingp1n
+/SECURITY.md            @r0llingp1n

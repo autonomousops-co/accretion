@@ -1,0 +1,124 @@
+replicaCount: 1
+
+image:
+  repository: accretion-api
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# REPLACE THE HOSTNAME BELOW. `example.com` is RFC 2606 reserved and nobody can
+# register it, so this file renders and validates but serves nothing until you
+# put your own domain in. The name must match under both `hosts` and
+# `managedCertificate.domains`, or the Ingress routes to a certificate that does
+# not cover it.
+#
+# globalStaticIP is the NAME of a global static IP already reserved in your GCP
+# project, not an address.
+#
+# This is the GKE dev environment, not the local kind stack -- `make up` uses
+# deploy/tilt.yaml and renders no Ingress at all.
+ingress:
+  enabled: true
+  className: "gce"
+  globalStaticIP: "accretion-api-dev-ip"
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.allow-http: "true"
+  hosts:
+    - host: dev.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  managedCertificate:
+    enabled: true
+    domains:
+      - dev.example.com
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+autoscaling:
+  enabled: false
+
+config:
+  server:
+    host: "0.0.0.0"
+
+  database:
+    host: "accretion-db-postgresql.accretion-db.svc.cluster.local"
+    port: 5432
+    user: "postgres"
+    password: "postgres"
+    database: "accretion"
+    sslmode: "disable"
+
+  logging:
+    level: "debug"
+    format: "json"
+
+# Dev identities. Authentication is ON in dev — that is the point of declaring
+# these — so `--disable-authentication` never becomes the next shim.
+#
+# EMPTY, and hash-only when filled. Until #122 this list carried three checked-in
+# plaintext `key` entries, from which the chart derived both the server's digest
+# and the client's copy. One input, so the two halves could not drift — but a
+# working credential shipped in the repository, and the same template that
+# published the plaintext to clients is what forced
+# security.forbidPlaintextAPIKeys OFF here. The plaintext now lives in .env
+# (ACCRETION_API_KEY_MCP, ACCRETION_API_KEY_DISCORD, ACCRETION_API_KEY_CI) and
+# only a SHA-256 `hash` belongs in a values file, so the guard stays at its safe
+# default and this file inherits it rather than opting out.
+#
+# The price is that the two halves CAN now disagree, and the only symptom of a
+# mismatch is a 401 with nothing explaining it. That is paid for with a gate,
+# not a comment: `make secrets` refuses to create either Secret unless every
+# identity's hash is the digest of its plaintext in .env
+# (scripts/check-api-key-hashes.sh), and `make secrets-identity-check` proves
+# that gate fires.
+#
+# Generate your own keys and print the block to paste here:
+#
+#     openssl rand -hex 32                      # once per caller, into .env
+#     scripts/make-secret.sh --print-identities # the apiKeys block .env implies
+#
+# Left empty rather than pre-filled because there is no digest that can be
+# checked in: the plaintext it must match is yours and lives only in your .env.
+# An empty list is refused at render time by the chart's fail-closed guard, so
+# `make deploy-auth STACK=dev` names its callers explicitly, exactly as staging
+# and prod already do.
+apiKeys: []
+  # - name: accretion-mcp
+  #   hash: "<64 hex characters, from --print-identities>"
+  #   permissions: ["read:memory", "chat:query"]
+
+# The list above covers MACHINE callers only. The human OAuth whitelist
+# (ACCRETION_AUTH_{ALLOWED,ADMIN}_{EMAILS,DOMAINS}) is deliberately NOT a chart
+# value: it arrives through accretion-api-secrets from your .env, via
+# scripts/make-secret.sh. It stays there because it is per-developer — your own
+# Google account — and because the env vars would override a ConfigMap value
+# anyway, so putting it in both places would create a precedence puzzle rather
+# than one answer. `cp env.example .env` ships a working default:
+# ACCRETION_AUTH_ALLOWED_EMAILS=you@example.com, an RFC 2606 reserved address
+# nobody can register, so a bare checkout comes up closed. Put your real address
+# there to log in to the web UI; API-key clients need nothing further.
+
+# accretion-mcp-secrets — the Secret the four checked-in MCP client configs
+# resolve — is created by scripts/make-secret.sh from .env, not by this chart.
+# It used to be a chart-owned Secret carrying accretion-mcp's plaintext, which
+# is what made it structurally incompatible with the plaintext guard (#122).
+
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: "postgres"
+    database: "accretion"
+  primary:
+    persistence:
+      size: 8Gi
+
+ollama:
+  enabled: false

@@ -1,0 +1,128 @@
+{{/*
+Redis holds the controller's pod-assignment state, so it deploys on exactly the
+same condition as the controller (#93): only when a collector is scaled out.
+The redis.enabled value selects the Bitnami subchart over this standalone
+template and is unrelated to whether Redis is deployed at all.
+
+No volume, on purpose. The state here is reconciled, not owned: worker health
+keys carry a 60s TTL and the controller's syncUnassignedPods re-derives every
+assignment from the pod informer on a 60s loop, so a restart costs one
+re-assignment pass and nothing else. A PVC would persist stale assignments
+across exactly the restart the controller is built to rebuild from (#105,
+answering #97).
+
+maxmemory is set below the container's memory limit so a full store is an
+error Redis returns, not an OOMKill that drops every queued item at once.
+Be precise about what that buys: above the cap EVERY write that allocates is
+refused with OOM -- the controller's LPUSH and the workers' heartbeat HMSET
+alike -- so health keys expire on their 60s TTL, the controller marks every
+worker dead, reassigns, and the queue stalls until something frees memory.
+The cap is a circuit breaker, not a degraded mode. noeviction is still the
+right policy, because the alternatives would silently evict health,
+assignment or work keys behind the controller's back, and this fails
+predictably and loudly instead; the real control is alerting on used_memory
+approaching maxmemory well before it trips.
+
+--save "" turns the image's default RDB snapshots off. Persistence is
+explicitly unwanted (above), and the defaults are actively harmful here: a
+BGSAVE forks against the dataset and its copy-on-write pages count toward the
+256Mi limit, and with stop-writes-on-bgsave-error=yes a failed snapshot turns
+every write into MISCONF -- a total stall, worse than the bounded OOM the cap
+exists for.
+
+The password never appears as a command-line argument (#111): redis-server
+has no env-var form of requirepass, only a config-file directive, so
+templates/secrets.yaml renders one into the redis-secret's `redis.conf` key
+and it is mounted here as a file. `command` then names that file's path, not
+the password, so it is absent from both the rendered pod spec (`get pods`)
+and this container's process table.
+*/}}
+{{- if and (not (index .Values "redis" "enabled")) (include "accretion-collector.scaleOutEnabled" .) }}
+# Standalone Redis deployment (Bitnami Redis images are no longer freely available)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-redis-master
+  labels:
+    app: {{ .Release.Name }}-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-redis
+  template:
+    metadata:
+      annotations:
+        # Without this, rotating redis.auth.password only rewrites the
+        # mounted Secret's bytes -- redis-server reads requirepass once at
+        # startup and keeps the old password indefinitely (cycle-1 review;
+        # this Deployment had no restart trigger at all). Matches the
+        # checksum/secret pattern already used in
+        # charts/accretion-discord/templates/deployment.yaml.
+        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+      labels:
+        app: {{ .Release.Name }}-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          command:
+            - redis-server
+            {{- if .Values.redis.auth.enabled }}
+            - /etc/redis-secret/redis.conf
+            {{- end }}
+            - "--maxmemory"
+            - {{ required "redis.maxmemory must be set: without it a full queue is an OOMKill, not an error" .Values.redis.maxmemory | quote }}
+            - "--maxmemory-policy"
+            - {{ .Values.redis.maxmemoryPolicy | quote }}
+            # No RDB snapshots: see the note above. Asserted by make redis-check.
+            - "--save"
+            - ""
+          {{- if .Values.redis.auth.enabled }}
+          volumeMounts:
+            - name: redis-auth
+              mountPath: /etc/redis-secret
+              readOnly: true
+          {{- end }}
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              # redis.maxmemory is sized against this. Raise both together.
+              memory: "256Mi"
+      {{- if .Values.redis.auth.enabled }}
+      volumes:
+        # #113: with redis.auth.existingSecret set, secretName/key below
+        # resolve to the operator-supplied Secret instead of this chart's own
+        # redis-secret -- see accretion-collector.redisSecretName /
+        # redisSecretConfKey in _helpers.tpl. That Secret MUST carry BOTH keys
+        # this chart's Redis path reads: the password key (clients, via
+        # controller-deployment.yaml's wait-for-redis / data-collector's
+        # REDISCLI_AUTH) AND this conf key (the server itself, mounted below).
+        # A Secret with only the password key renders fine and fails at
+        # container start, since this mount would then 404 on the conf key --
+        # values.yaml's comment on redis.auth.existingSecret names this
+        # failure mode; templates/secrets.yaml's render-time guard only
+        # catches a blanked-out key NAME, not a Secret missing the key.
+        - name: redis-auth
+          secret:
+            secretName: {{ include "accretion-collector.redisSecretName" . }}
+            items:
+              - key: {{ include "accretion-collector.redisSecretConfKey" . }}
+                path: redis.conf
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-redis-master
+spec:
+  selector:
+    app: {{ .Release.Name }}-redis
+  ports:
+    - port: {{ .Values.config.redis.port }}
+      targetPort: 6379
+{{- end }}

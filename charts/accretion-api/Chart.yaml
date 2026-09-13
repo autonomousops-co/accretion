@@ -1,0 +1,18 @@
+apiVersion: v2
+name: accretion-api
+description: AI-powered Kubernetes log analysis service
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+
+
+keywords:
+  - kubernetes
+  - ai
+  - logs
+  - monitoring
+  - analysis
+
+maintainers:
+  - name: Accretion API Team
+    email: maintainers@autonomousops.co

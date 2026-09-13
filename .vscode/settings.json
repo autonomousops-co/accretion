@@ -1,0 +1,7 @@
+{
+    "makefile.configureOnOpen": false,
+    "claude.agentTeams": true,
+    "files.trimFinalNewlines": false,
+    "files.trimTrailingWhitespace": false,
+    "files.insertFinalNewline": false
+}

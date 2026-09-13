@@ -1,0 +1,31 @@
+{{- $isGCP := false }}
+{{- if .Values.ollama.autoDetectGCP }}
+  {{- $isGCP = or (contains "gke" (toString .Values.global.cluster)) (contains "gcp" (toString .Values.global.cluster)) (contains "google" (toString .Values.global.cluster)) }}
+{{- end }}
+{{- if and (or .Values.ollama.enabled $isGCP) .Values.ollama.persistence.enabled }}
+{{- $zones := list "us-central1-a" "us-central1-c" "us-central1-f" }}
+{{- range $zone := $zones }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "accretion-api.fullname" $ }}-ollama-data-{{ $zone | replace "us-central1-" "" }}
+  labels:
+    {{- include "accretion-api.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: ollama
+    zone: {{ $zone }}
+  annotations:
+    "helm.sh/resource-policy": keep
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ $.Values.ollama.persistence.size }}
+  {{- if and $isGCP $.Values.ollama.gcp.storageClass }}
+  storageClassName: {{ $.Values.ollama.gcp.storageClass }}
+  {{- else if $.Values.ollama.persistence.storageClass }}
+  storageClassName: {{ $.Values.ollama.persistence.storageClass }}
+  {{- end }}
+{{- end }}
+{{- end }}

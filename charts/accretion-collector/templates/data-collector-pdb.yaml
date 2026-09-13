@@ -1,0 +1,50 @@
+{{- if .Values.dataCollector.enabled }}
+{{- $shared := include "accretion-collector.sharedDataCollectors" . | fromJsonArray }}
+{{- if and $shared .Values.dataCollector.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "accretion-collector.fullname" . }}-data-collector
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "accretion-collector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-collector
+spec:
+  {{- if .Values.dataCollector.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ .Values.dataCollector.podDisruptionBudget.minAvailable }}
+  {{- end }}
+  {{- if .Values.dataCollector.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.dataCollector.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "accretion-collector.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: data-collector
+{{- end }}
+
+{{- range $name := (include "accretion-collector.splitDataCollectors" . | fromJsonArray) }}
+{{- $spec := index $.Values.dataCollector.kinds $name }}
+{{- if $spec.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "accretion-collector.fullname" $ }}-{{ $name }}-collector
+  namespace: {{ $.Release.Namespace | quote }}
+  labels:
+    {{- include "accretion-collector.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $name }}-collector
+spec:
+  {{- if $spec.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ $spec.podDisruptionBudget.minAvailable }}
+  {{- end }}
+  {{- if $spec.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ $spec.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "accretion-collector.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ $name }}-collector
+{{- end }}
+{{- end }}
+{{- end }}

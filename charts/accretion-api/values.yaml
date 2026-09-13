@@ -1,0 +1,552 @@
+replicaCount: 1
+
+# Global configuration
+global:
+  cluster: ""  # Will be auto-detected or set by values files
+
+image:
+  repository: accretion-api
+  tag: latest
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: NodePort  # Changed from LoadBalancer to work with Ingress
+  # One Service port per listener. They must differ: Kubernetes keys Service
+  # ports on the port number, so two entries sharing one produce an invalid
+  # Service and, worse, a Helm patch that empties spec.ports on the next upgrade.
+  port: 80
+  uiPort: 8081
+
+# Off by default, and generic when turned on.
+#
+# This block used to ship one organization's production identity: ingress on, a
+# `gce` class, a pre-reserved static IP by name, the apex and www hosts of a
+# real domain, and a GKE ManagedCertificate requesting both. A stranger running
+# `helm install` with no values file therefore asked Google for a certificate
+# for a domain they do not own, bound to a static IP absent from their project
+# -- and off GKE neither the `gce` class nor the ManagedCertificate kind exists
+# at all. Same shape as #115: the default is safe and generic, and the
+# environment that wants something specific opts in. Every deployment path
+# already restates all of this (values-{dev,staging,prod}.yaml, the Tiltfile,
+# and Pulumi's values map), so nothing that deploys today changes.
+ingress:
+  enabled: false
+  # Platform-specific, so there is no default that is right everywhere: "gce" on
+  # GKE, "nginx" for an ingress-nginx controller, and so on. templates/service.yaml
+  # also reads this -- it annotates the Service with cloud.google.com/app-protocols
+  # only when the class is gce, because the GCE load balancer otherwise speaks
+  # cleartext into the TLS port and answers 502 with nothing in any log.
+  className: ""
+  # GKE only: the name of a pre-reserved global static IP to bind the Ingress to.
+  # Empty means the platform assigns one.
+  globalStaticIP: ""
+  # Empty, like every other default here. These carried
+  # `kubernetes.io/ingress.class: gce` and `kubernetes.io/ingress.allow-http:
+  # "false"`, both GCE-specific annotation keys, so they were the same defect as
+  # the apex domain: a GKE assumption every install inherited.
+  #
+  # Emptying them is only safe because templates/ingress.yaml no longer decides
+  # whether to emit the annotations block by asking whether THIS map is
+  # non-empty. While it did, a caller that enabled the managed certificate and
+  # supplied no annotations of its own either got no GKE annotations at all (no
+  # class set) or failed to render outright (class set, because the template
+  # mutated this map in place and `hasKey` on a nil map is fatal). Neither was
+  # reachable while this map shipped non-empty, which is exactly why emptying it
+  # had to wait for that fix. The class annotation is now derived from
+  # ingress.className, and the two GKE annotations from
+  # ingress.managedCertificate.enabled.
+  #
+  # An environment that wants HTTPS-only on a GCE Ingress must say so:
+  #   kubernetes.io/ingress.allow-http: "false"
+  annotations: {}
+  # One entry per hostname this deployment answers on. Empty by default: a
+  # default hostname is always someone else's.
+  hosts: []
+    # - host: accretion.example.com
+    #   paths:
+    #     - path: /
+    #       pathType: Prefix
+  # GKE-only: a Google-managed SSL certificate provisioned for the Ingress.
+  # Kept separate from `ingress.tls` below because the two are different shapes
+  # for different platforms — this is a map consumed by managed-certificate.yaml,
+  # that is the standard Kubernetes list consumed by ingress.yaml. They used to
+  # share the `tls` key, which meant supplying the documented list form broke the
+  # ManagedCertificate on a map lookup against a slice.
+  managedCertificate:
+    # Off by default: it is GKE-only, and it asks Google to issue a certificate
+    # for whatever is in `domains` -- which must be a domain you control and
+    # have pointed at this Ingress.
+    enabled: false
+    domains: []
+
+  # Standard Kubernetes Ingress TLS: a list of {secretName, hosts}. Use this to
+  # bring your own certificate Secret on any platform. Empty by default; the GKE
+  # deployments above use managedCertificate instead.
+  tls: []
+    # NOTE: a DIFFERENT Secret from config.api.tls's — that one holds the
+    # certificate the pod serves on 41337, this one terminates at the Ingress.
+    # - secretName: accretion-api-ingress-tls
+    #   hosts:
+    #     - accretion-api.example.com
+
+resources:
+  # Measured usage on a running cluster is ~51m CPU / 28Mi. Requests are what the
+  # scheduler reserves, so they are sized for real usage plus headroom for request
+  # bursts and the exec liveness probe, not for the old 250m/256Mi guess.
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Application configuration
+config:
+  # The browser-facing surface: the web UI, its static assets, and the /auth/*
+  # OAuth flow that logs a human into it.
+  #
+  # Off by default. The primary interfaces are accretion-mcp and the Discord
+  # bot, which authenticate by API key, so the default deployment is API-only
+  # and needs no OAuth client, no user whitelist, and no browser reachability.
+  # Set true to serve the web interface — that deployment then requires
+  # auth.oauth.* and at least one entry in the user whitelist.
+  ui:
+    enabled: false
+    port: 8080
+
+  # The machine-facing listener: /api/* behind API keys, plus /api/health. This
+  # is what accretion-mcp, the Discord bot and any HTTP client talk to. Separate
+  # from the UI so exposing the API never exposes the browser surface — including
+  # /auth/*, the only unauthenticated non-health routes in the system.
+  api:
+    enabled: true
+    port: 41337
+    # Response write deadline. Bounds the whole handler, so it must cover
+    # /api/chat's non-streaming RAG flow of sequential LLM calls.
+    writeTimeout: "120s"
+
+    # In-process TLS termination on the API listener.
+    #
+    # Fail-closed at two levels: the chart refuses to render when enabled is true
+    # with no certificate source (see _validation.tpl), and the server aborts at
+    # startup rather than falling back to cleartext if the mounted keypair is
+    # unreadable.
+    #
+    # Note there is deliberately NO second Service port for TLS. The Service
+    # targets the container port by NAME (targetPort: api), so enabling TLS
+    # changes the scheme on the existing port and nothing else. Adding a second
+    # port entry is what emptied spec.ports during the listener split, because
+    # Helm's merge key on ports is `port`.
+    tls:
+      # On by default. Set false for an environment that terminates TLS
+      # elsewhere; there is no in-between, because the server never degrades to
+      # cleartext on its own.
+      enabled: true
+      # Lowest accepted TLS version, "1.2" or "1.3". 1.2 is the floor.
+      minVersion: "1.2"
+      # Where the certificate Secret is mounted. cert_file, key_file and the CA
+      # path are derived from this, so clients and probes never have to be told
+      # them separately.
+      mountPath: /etc/accretion/tls
+
+      # Source 1: let cert-manager issue the certificate. Off by default because
+      # cert-manager is not a chart dependency — it must already be installed in
+      # the cluster.
+      certManager:
+        # Default source, so a chart install with no extra flags produces
+        # working TLS. cert-manager must be installed in the cluster; use
+        # existingSecret instead if you issue certificates another way.
+        enabled: true
+        # By default the chart bootstraps its own self-signed CA (a SelfSigned
+        # Issuer, a CA Certificate, then a CA Issuer) so `make up` produces
+        # working TLS with no manual steps. To issue from an issuer you already
+        # run, set issuerRef instead and the chart creates no issuers of its own.
+        issuerRef: {}
+        #  name: letsencrypt-prod
+        #  kind: ClusterIssuer
+        #  group: cert-manager.io
+        # Leaf certificate lifetime.
+        duration: 2160h    # 90d
+        renewBefore: 360h  # 15d
+        # The bootstrap CA's own lifetime, deliberately much longer than the
+        # leaf's. A CA that expires on the same schedule as the certificates it
+        # signs has no slack — one missed renewal expires the entire trust chain
+        # at once, and the probes verify against this CA, so every pod
+        # CrashLoops together.
+        caDuration: 43800h     # 5y
+        caRenewBefore: 8760h   # 1y
+        # SANs beyond the in-cluster Service DNS, localhost and 127.0.0.1, which
+        # are always included. The loopback names are not optional: every local
+        # client dials localhost:41337 through a port-forward, so a certificate
+        # without them verifies in-cluster and breaks every contributor.
+        extraDNSNames: []
+        extraIPAddresses: []
+
+      # The CA bundle clients (including the healthcheck probes) verify this
+      # listener against. Left empty the chart fills it in automatically for a
+      # cert-manager-issued certificate, whose Secret carries ca.crt next to the
+      # keypair; an empty value otherwise means "verify against the system pool",
+      # which is correct for a publicly-trusted certificate. Set it explicitly
+      # only for a bring-your-own Secret that does contain a ca.crt.
+      caFile: ""
+
+      # Source 2: bring your own. Name a Secret that already holds tls.crt and
+      # tls.key (and ca.crt, if the issuer is private). Takes precedence over
+      # certManager, so operators who already issue certificates are not forced
+      # onto cert-manager.
+      existingSecret: ""
+  server:
+    host: "0.0.0.0"
+
+  database:
+    host: "accretion-db-postgresql.accretion-db.svc.cluster.local"
+    port: 5432
+    user: "postgres"
+    # Source for the chart-created db-password Secret (templates/secret.yaml).
+    # DEV ONLY: prod must not hardcode this — supply the password out-of-band via
+    # existingSecret (below) or --set-string config.database.password=... The
+    # ACCRETION_DATABASE_PASSWORD env var (secretKeyRef) injects it at runtime;
+    # it is no longer written into the ConfigMap.
+    password: "postgres"
+    # When set, the chart does NOT create its own db-password Secret and both the
+    # main container (ACCRETION_DATABASE_PASSWORD) and the wait-for-postgres
+    # initContainer (PGPASSWORD) reference this operator-provisioned secret
+    # (which must contain a db-password key). Leave "" to let the chart manage it.
+    existingSecret: ""
+    database: "accretion"
+    sslmode: "disable"
+
+  llm:
+    provider: "ollama"
+    openai:
+      base_url: "https://api.openai.com/v1"
+      model: "gpt-4"
+    ollama:
+      # Primary Ollama endpoint (local cluster)
+      base_url: "http://accretion-api-ollama:11434"
+      model: "{{ .Values.ollama.models.inference }}"
+    embedding_model: "{{ .Values.ollama.models.embedding }}"
+    chat_model: "{{ .Values.ollama.models.chat }}"
+
+  k8s:
+    config_path: ""
+    namespaces:
+      - "default"
+
+  logging:
+    level: "debug"
+    format: "json"
+
+  telemetry:
+    enabled: true
+    endpoint: "otel-collector.obs.svc.cluster.local:4317"
+    sample_rate: 1.0
+    insecure: true
+    logs_enabled: true
+
+  # Trace read-back. This is the query half of the same integration
+  # `telemetry` above writes into: telemetry exports spans to the collector,
+  # tempo reads them back for /api/traces and /api/traces/{traceID}. Leaving
+  # this disabled while telemetry is on pays the full cost of tracing and
+  # then makes the traces unreachable, so the two default together.
+  tempo:
+    enabled: true
+    # Tempo's query API, not the collector's OTLP ingest port (4317).
+    base_url: "http://otel-collector-tempo.obs.svc.cluster.local:3200"
+
+# Ollama deployment configuration
+ollama:
+  # Auto-enable for GCP clusters, manual control for others
+  enabled: false  # Set to true to force enable, or let GCP detection handle it
+  autoDetectGCP: true  # Automatically enable when deployed to GCP
+
+  # CORS: by default OLLAMA_ORIGINS is scoped to the in-cluster accretion-api
+  # service DNS. Set to true only for local dev to allow any origin ("*").
+  allowAnyOrigin: false
+
+  image:
+    repository: ollama/ollama
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 11434
+
+  # Model configuration
+  models:
+    # Primary models for different tasks
+    embedding: "nomic-embed-text:latest"
+    chat: "llama3:8b"
+
+    # List of models to pre-load into Ollama (only the ones we actually use)
+    preload:
+      - "llama3:8b"               # Used for chat
+      - "nomic-embed-text:latest" # Used for embeddings
+
+  # Resource configuration (sized for n1-standard-2 GPU nodes)
+  resources:
+    limits:
+      cpu: 1500m
+      memory: 6Gi
+      # GPU will be added automatically for GCP GPU nodes
+    requests:
+      cpu: 1000m
+      memory: 3Gi
+
+  # Persistence for model storage
+  persistence:
+    enabled: true
+    size: 50Gi  # Increased for multiple models
+    storageClass: ""  # Will use GCP SSD for GCP clusters
+
+  # GCP-specific configuration
+  gcp:
+    # GPU configuration for GCP
+    gpu:
+      enabled: true   # Enable GPU for Ollama
+      type: "nvidia-l4"  # l4, t4, v100, a100
+      count: 1
+
+    # Node selection for GCP - ONLY deploy to GPU nodes
+    nodeSelector:
+      cloud.google.com/gke-nodepool: "gpu-pool-l4"  # L4 GPU node pool
+      cloud.google.com/gke-accelerator: "nvidia-l4"  # Ensure L4 GPU nodes
+
+    # GCP-optimized storage class (use premium-rwo for SSD performance)
+    storageClass: "premium-rwo"
+
+    # Multi-zone Ollama configuration
+  multiZone:
+    enabled: true
+    zones:
+      - "us-central1-a"
+      - "us-central1-b"
+      - "us-central1-c"
+    domain: "cluster.local"  # Default Kubernetes cluster domain
+
+    # Load balancer for multi-zone Ollama access
+    loadBalancer:
+      enabled: false  # Set to true to create a load balancer
+      type: "LoadBalancer"  # or "ClusterIP" for internal only
+      # loadBalancerIP: "10.1.2.100"  # Optional static IP
+      annotations: {}
+        # cloud.google.com/load-balancer-type: "External"
+        # networking.gke.io/load-balancer-type: "External"
+
+    # External Ollama instances (if you have them running outside the cluster)
+    externalInstances: []
+    # Example - configure these with actual IPs/hosts of Ollama instances:
+    # externalInstances:
+    #   - zone: "us-central1-b"
+    #     host: "ollama-b.example.com"  # For ExternalName services
+    #     ip: "10.1.2.3"               # For LoadBalancer endpoints
+    #     port: 11434
+    #   - zone: "us-central1-c"
+    #     host: "ollama-c.example.com"
+    #     ip: "10.1.2.4"
+    #     port: 11434
+
+# RBAC settings
+rbac:
+  create: true
+  rules:
+    - apiGroups: [""]
+      resources: ["pods"]
+      verbs: ["get", "list", "watch"]
+    - apiGroups: [""]
+      resources: ["pods/log"]
+      verbs: ["get", "list"]
+    - apiGroups: ["metrics.k8s.io"]
+      resources: ["pods"]
+      verbs: ["get", "list"]
+    - apiGroups: [""]
+      resources: ["persistentvolumeclaims"]
+      verbs: ["get", "list", "create", "patch"]
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# Chart-level security guards (templates/_validation.tpl). No single posture
+# here: enforceStrongDbPassword is opt-in (false below, so dev/staging keep
+# templating with their local defaults; only values-prod.yaml sets it true).
+# forbidPlaintextAPIKeys is the opposite shape — on by default below, with
+# dev opting explicitly out. Read each flag's own comment, not this heading,
+# for what a bare `helm install` actually gets.
+security:
+  # Refuse to render when config.database.password is empty or "postgres".
+  # Opt-in: false here, so only values-prod.yaml (which sets it true) pays for
+  # it. Staging does not set this — it inherits false, same as dev.
+  enforceStrongDbPassword: false
+  # Refuse to render any apiKeys entry carrying a plaintext `key`, so the
+  # plaintext never enters the Helm release. On by default: a new environment
+  # file, or a `helm install` with no values file at all, should get the safe
+  # behavior without having to know to ask for it. Set false only where
+  # checked-in dev keys are intended, and say why (values-dev.yaml does).
+  forbidPlaintextAPIKeys: true
+
+# SECURITY: dev-only kill switch. When true the chart passes
+# --disable-authentication to the server, which makes RequireAuth pass every
+# request through — and, because the guard below only fires when authentication
+# is enabled, it also disables the fail-closed check on an empty `apiKeys`. No
+# deployment path sets it: the Tiltfile runs the kind stack with auth ON. It is
+# declared here rather than left implicit so `helm show values` reveals the
+# switch exists; a kill switch nobody can see is the harder one to audit.
+disableAuthentication: false
+
+# Per-client API-key identities.
+#
+# One entry per caller (MCP client, Discord bot, CI, a developer's curl). Each
+# is rendered into the ConfigMap as an `auth.api_key_identities` entry, so the
+# server knows the key's SHA-256 digest, its name, and its permissions — and
+# every request is attributable to one client and revocable on its own.
+#
+# Supply exactly one of:
+#   hash  hex SHA-256 of the key. Preferred everywhere the plaintext must not
+#         enter the Helm release (i.e. production). Produce it with:
+#             printf '%s' "$KEY" | shasum -a 256
+#   key   the plaintext key. Dev convenience only: the chart derives the hash
+#         (Helm's sha256sum is byte-identical to the shasum above) AND publishes
+#         the plaintext to clients via the chart-owned client-keys Secret, so
+#         verifier and client never drift.
+#
+# `permissions` must be non-empty and is an exact-match list — there is no
+# hierarchy, so `admin:all` does NOT imply `read:memory`. The permissions the
+# routes actually require are `read:memory` and `chat:query`.
+#
+# `read:memory` grants reads of Accretion's own store — the logs, events, traces
+# and status records the collector captured and embedded. It confers no access
+# to the Kubernetes API: every caller reaches this data over HTTP through
+# accretion-api, never through a control plane.
+#
+# Empty is fail-closed: the chart refuses to render with authentication enabled
+# and no identities (templates/_validation.tpl).
+apiKeys: []
+  # - name: accretion-mcp
+  #   hash: "<hex sha256 of the key>"
+  #   permissions: ["read:memory"]
+  # - name: accretion-discord
+  #   key: "dev-only-plaintext"
+  #   permissions: ["read:memory", "chat:query"]
+
+# The MCP client's credential is NOT a chart value.
+#
+# The chart used to own an `mcpSecret` block and a templates/mcp-secret.yaml
+# that published a named identity's plaintext `key` to clients. That is what
+# forced security.forbidPlaintextAPIKeys off wherever a local MCP credential was
+# wanted: the guard refuses any identity carrying a plaintext, and that template
+# existed to publish one, so no identity could satisfy both. #122 removed it.
+#
+# scripts/make-secret.sh now creates accretion-mcp-secrets from .env, under the
+# same keys internal/mcp/secrets resolves and the same name the four checked-in
+# editor configs already carry. One object, one owner. The plaintext never
+# enters the Helm release, so this chart holds only the SHA-256 `hash` above and
+# the guard stays on everywhere, including locally.
+
+# Environment variables for the accretion-api container
+# These will be injected from Kubernetes secrets
+env:
+  # Key material is NOT optional. An absent secretKeyRef leaves the env var
+  # unset, which the server cannot distinguish from "not configured" — the OAuth
+  # flow comes up with no client ID and every request 401s, with no deploy error
+  # anywhere. Failing the pod surfaces a misnamed or missing Secret key at
+  # rollout instead. Create them with scripts/make-secret.sh.
+  #
+  # `optional: true` below does NOT mean "safe to omit". Two separate mechanisms
+  # decide what is required:
+  #   - the kubelet, for the three refs immediately below — a missing key fails
+  #     the pod;
+  #   - the server, for the four accretion-auth-{allowed,admin}-* refs — each is
+  #     optional here because any ONE of them satisfies the whitelist, so none
+  #     can be individually mandatory, but auth.NewAuthManager refuses to start
+  #     when all four are empty (an empty whitelist admits every account that
+  #     completes the OAuth flow). Optional to the kubelet, fatal at startup.
+  # scripts/make-secret.sh checks both, so the failure surfaces before rollout.
+  - name: OAUTH_CLIENT_ID
+    valueFrom:
+      secretKeyRef:
+        name: accretion-api-secrets
+        key: oauth-client-id
+  - name: OAUTH_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: accretion-api-secrets
+        key: oauth-client-secret
+  - name: SESSION_KEY
+    valueFrom:
+      secretKeyRef:
+        name: accretion-api-secrets
+        key: session-key
+  - name: ACCRETION_AUTH_OAUTH_REDIRECT_URL
+    valueFrom:
+      secretKeyRef:
+        name: accretion-api-secrets
+        key: accretion-auth-oauth-redirect-url
+        optional: true
+  - name: ACCRETION_AUTH_ALLOWED_EMAILS
+    valueFrom:
+      secretKeyRef:
+        name: accretion-api-secrets
+        key: accretion-auth-allowed-emails
+        optional: true
+  - name: ACCRETION_AUTH_ALLOWED_DOMAINS
+    valueFrom:
+      secretKeyRef:
+        name: accretion-api-secrets
+        key: accretion-auth-allowed-domains
+        optional: true
+  - name: ACCRETION_AUTH_ADMIN_EMAILS
+    valueFrom:
+      secretKeyRef:
+        name: accretion-api-secrets
+        key: accretion-auth-admin-emails
+        optional: true
+  - name: ACCRETION_AUTH_ADMIN_DOMAINS
+    valueFrom:
+      secretKeyRef:
+        name: accretion-api-secrets
+        key: accretion-auth-admin-domains
+        optional: true
+  - name: ACCRETION_AUTH_COOKIE_SECURE
+    valueFrom:
+      secretKeyRef:
+        name: accretion-api-secrets
+        key: accretion-auth-cookie-secure
+        optional: true
+  - name: ACCRETION_AUTH_COOKIE_DOMAIN
+    valueFrom:
+      secretKeyRef:
+        name: accretion-api-secrets
+        key: accretion-auth-cookie-domain
+        optional: true
+  - name: ACCRETION_LOGGING_FRONTEND_LEVEL
+    valueFrom:
+      secretKeyRef:
+        name: accretion-api-secrets
+        key: accretion-logging-frontend-level
+        optional: true
+  # Optional unlike the auth key material above: the default LLM provider is
+  # ollama, and an install that never calls OpenAI legitimately has no such key.
+  - name: ACCRETION_LLM_OPENAI_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: accretion-api-secrets
+        key: openai-api-key
+        optional: true

@@ -1,0 +1,181 @@
+{{- $isGCP := false }}
+{{- if .Values.ollama.autoDetectGCP }}
+  {{- $isGCP = or (contains "gke" (toString .Values.global.cluster)) (contains "gcp" (toString .Values.global.cluster)) (contains "google" (toString .Values.global.cluster)) }}
+{{- end }}
+{{- if and (or .Values.ollama.enabled $isGCP) (not .Values.ollama.multiZone.enabled) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "accretion-api.fullname" . }}-ollama
+  labels:
+    {{- include "accretion-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "accretion-api.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ollama
+  template:
+    metadata:
+      labels:
+        {{- include "accretion-api.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ollama
+    spec:
+      {{- if and $isGCP .Values.ollama.gcp.nodeSelector }}
+      nodeSelector:
+        {{- toYaml .Values.ollama.gcp.nodeSelector | nindent 8 }}
+      {{- end }}
+      {{- if and $isGCP .Values.ollama.gcp.gpu.enabled }}
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "present"
+          effect: "NoSchedule"
+      {{- end }}
+      initContainers:
+        # Pre-download models during initialization
+        - name: model-loader
+          image: "{{ .Values.ollama.image.repository }}:{{ .Values.ollama.image.tag }}"
+          command: ["/bin/bash"]
+          args:
+            - -c
+            - |
+              echo "Starting Ollama model pre-loading..."
+              ollama serve &
+              OLLAMA_PID=$!
+
+              # Wait for Ollama to be ready
+              echo "Waiting for Ollama service to be ready..."
+              for i in {1..30}; do
+                if curl -f http://localhost:11434/api/tags >/dev/null 2>&1; then
+                  echo "Ollama is ready!"
+                  break
+                fi
+                echo "Waiting... ($i/30)"
+                sleep 2
+              done
+
+              # Pre-load all configured models
+              {{- range .Values.ollama.models.preload }}
+              echo "Pulling model: {{ . }}"
+              ollama pull "{{ . }}" || echo "Failed to pull {{ . }}, continuing..."
+              {{- end }}
+
+              echo "Model pre-loading completed!"
+              kill $OLLAMA_PID
+              wait $OLLAMA_PID
+          volumeMounts:
+            {{- if .Values.ollama.persistence.enabled }}
+            - name: ollama-data
+              mountPath: /root/.ollama
+            {{- end }}
+          resources:
+            limits:
+              cpu: 1500m
+              memory: 4Gi
+            requests:
+              cpu: 500m
+              memory: 2Gi
+      containers:
+        - name: ollama
+          image: "{{ .Values.ollama.image.repository }}:{{ .Values.ollama.image.tag }}"
+          imagePullPolicy: {{ .Values.ollama.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 11434
+              protocol: TCP
+          env:
+            - name: OLLAMA_HOST
+              value: "0.0.0.0"
+            - name: OLLAMA_ORIGINS
+              {{- if .Values.ollama.allowAnyOrigin }}
+              value: "*"
+              {{- else }}
+              {{- $svc := printf "%s.%s.svc.cluster.local" (include "accretion-api.fullname" .) .Release.Namespace }}
+              value: {{ printf "http://%s,http://%s:%v" $svc $svc (.Values.service.port | default 80) | quote }}
+              {{- end }}
+            {{- if and $isGCP .Values.ollama.gcp.gpu.enabled }}
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,utility"
+            {{- end }}
+          volumeMounts:
+            {{- if .Values.ollama.persistence.enabled }}
+            - name: ollama-data
+              mountPath: /root/.ollama
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- if and $isGCP .Values.ollama.gcp.gpu.enabled }}
+            limits:
+              cpu: {{ .Values.ollama.resources.limits.cpu }}
+              memory: {{ .Values.ollama.resources.limits.memory }}
+              nvidia.com/gpu: {{ .Values.ollama.gcp.gpu.count }}
+            requests:
+              cpu: {{ .Values.ollama.resources.requests.cpu }}
+              memory: {{ .Values.ollama.resources.requests.memory }}
+              nvidia.com/gpu: {{ .Values.ollama.gcp.gpu.count }}
+            {{- else }}
+            {{- toYaml .Values.ollama.resources | nindent 12 }}
+            {{- end }}
+      volumes:
+        {{- if .Values.ollama.persistence.enabled }}
+        - name: ollama-data
+          persistentVolumeClaim:
+            claimName: {{ include "accretion-api.fullname" . }}-ollama-data
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "accretion-api.fullname" . }}-ollama
+  labels:
+    {{- include "accretion-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama
+spec:
+  type: {{ .Values.ollama.service.type }}
+  ports:
+    - port: {{ .Values.ollama.service.port }}
+      targetPort: 11434
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "accretion-api.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama
+{{- if .Values.ollama.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "accretion-api.fullname" . }}-ollama-data
+  labels:
+    {{- include "accretion-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama
+  annotations:
+    "helm.sh/resource-policy": keep
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- if or .Values.ollama.persistence.storageClass (and $isGCP .Values.ollama.gcp.storageClass) }}
+  storageClassName: {{ if $isGCP }}{{ .Values.ollama.gcp.storageClass }}{{ else }}{{ .Values.ollama.persistence.storageClass }}{{ end }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.ollama.persistence.size }}
+{{- end }}
+{{- end }}

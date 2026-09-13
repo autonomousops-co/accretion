@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "accretion": {
+      "type": "local",
+      "command": ["accretion-mcp"],
+      "environment": {
+        "ACCRETION_MCP_SECRET_NAME": "accretion-core/accretion-mcp-secrets"
+      }
+    }
+  }
+}

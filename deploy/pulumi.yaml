@@ -1,0 +1,222 @@
+# Central Helm values for every chart Pulumi deploys.
+#
+# Nested by CHART NAME at the top level. Each chart's subtree is loaded by
+# pulumi/pkg/config/values.go and passed to that chart's release and no other.
+# The set of top-level keys must equal the set of charts Pulumi deploys exactly:
+# a key naming no chart, or a chart with no key, fails the deploy by name. Helm
+# ignores unknown value keys silently, so a typo here would otherwise configure
+# nothing and say nothing — which is precisely how the collector's image tag and
+# autoscaling settings reached nothing for as long as they did.
+#
+# WHAT BELONGS HERE: settings every Pulumi deploy shares that the charts'
+# generic defaults do not provide.
+#
+# WHAT DOES NOT: anything that varies per stack or is only known at deploy time.
+# Those stay in pulumi/pkg/kubernetes/helm.go, and there are only three kinds —
+# the reserved static IP and the database host (outputs of the infrastructure
+# layer), the image tag and sizing (per-stack typed config), and the ingress
+# hostnames (derived from the stack's `domain`, the same value the DNS module
+# provisions the managed zone from, so the zone and the certificate cannot name
+# different domains).
+#
+# NO SECRET VALUE BELONGS IN THIS FILE. It is checked in, so the rule that keeps
+# credentials out of env.example and .envrc applies unchanged. The loader
+# refuses the shapes the charts would actually accept rather than trusting this
+# comment to prevent them.
+
+accretion-api:
+  image:
+    # Pinned rather than inherited: the chart's default repository is about to
+    # become generic, and its pullPolicy default suits a local kind cluster.
+    # Against a registry-hosted tag anything but Always risks serving a stale
+    # image after a retag. The tag itself is per-stack (imageTag).
+    repository: accretion-api
+    pullPolicy: Always
+
+  ingress:
+    enabled: true
+    className: "gce"
+    # The ONE GKE annotation Pulumi needs of its own. Everything else the
+    # Ingress requires is derived by the chart from the values above:
+    # kubernetes.io/ingress.class comes from className, and the
+    # managed-certificate and static-IP annotations come from
+    # managedCertificate.enabled and globalStaticIP.
+    #
+    # NOT a workaround for the empty-annotations bug in that template. That bug
+    # needs BOTH annotations and className to be empty, and this release sets
+    # className, which makes the chart populate the map itself -- verified by
+    # rendering against a chart whose default annotations were emptied.
+    annotations:
+      kubernetes.io/ingress.allow-http: "false"  # HTTPS-only
+    managedCertificate:
+      # GKE-only, and every Pulumi deploy is GKE. The domains are filled in from
+      # the stack's `domain` alongside ingress.hosts, so the certificate always
+      # requests exactly the names the Ingress serves.
+      enabled: true
+
+  config:
+    api:
+      tls:
+        # Must move in lockstep with the bot's api.tls.enabled. A bot dialing
+        # http:// into a TLS-only listener writes its bearer token onto the
+        # socket before the server's TLS alert tears the connection down, so a
+        # mismatch leaks the credential in the clear on every retry. Both
+        # defaults agree today; pinned on BOTH sides so one default changing
+        # cannot separate them.
+        enabled: true
+
+    database:
+      # THE FIX FOR THE PASSWORD THAT NEVER REACHED THE POD. Pulumi provisions
+      # the Secret named here (pulumi/pkg/kubernetes/secrets.go) with a
+      # db-password key. Without this the chart creates its own
+      # accretion-api-db Secret from config.database.password and reads the
+      # password from there, so Pulumi's Secret was provisioned, mounted by
+      # nothing, and the pod got the chart's default.
+      #
+      # Setting this also means config.database.password is never consulted, so
+      # no database password passes through Helm values on this path at all.
+      existingSecret: accretion-api-secrets
+
+  # Refuse any identity carrying a plaintext key. This is already the chart
+  # default; it is pinned because it is the one flag standing between a public
+  # chart and a working credential in a release, and a default that flipped once
+  # can flip again.
+  security:
+    forbidPlaintextAPIKeys: true
+
+  # The API-key identity ROSTER: one entry per caller, the same on every stack.
+  #
+  # Names and permissions only. Each identity's hex SHA-256 digest is per-stack
+  # credential material and comes from stack config, which the loader enforces —
+  # a `hash` or `key` here is refused rather than merged. Set a digest with:
+  #
+  #   pulumi config set --stack <stack> --secret --path 'apiKeyHashes.<name>' \
+  #       "$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)"
+  #
+  # An identity with no digest configured fails the deploy naming that command.
+  # Permissions are matched exactly, with no hierarchy: read:memory reads
+  # Accretion's own store, chat:query is additionally required to call /api/chat.
+  apiKeys:
+    - name: accretion-mcp
+      permissions: ["read:memory"]
+    # The bot calls /api/chat, so it needs chat:query on top of read:memory.
+    # Dropped from the roster on a stack that does not deploy the bot, so such a
+    # stack is not asked to configure a digest that would authenticate nothing.
+    - name: accretion-discord
+      permissions: ["read:memory", "chat:query"]
+
+accretion-collector:
+  # One image for all three collector Deployments. Same reasoning as the API's:
+  # this chart's own pullPolicy default is Never, a local-kind assumption that
+  # against a registry-hosted tag is an unconditional ImagePullBackOff.
+  collector:
+    image:
+      repository: accretion-api
+      pullPolicy: Always
+  statusCollector:
+    image:
+      repository: accretion-api
+      pullPolicy: Always
+
+  dataCollector:
+    image:
+      repository: accretion-api
+      pullPolicy: Always
+    # log and metric get their own Deployments so per-signal scaling works:
+    # sharing dataCollector.replicaCount would scale log, metric, event and
+    # trace together. Splitting them is also what makes scaleOutEnabled true,
+    # which is what brings the controller and Redis back. Their replica counts
+    # and autoscaling are per-stack sizing and stay in helm.go.
+    kinds:
+      log:
+        enabled: true
+        split: true
+      metric:
+        enabled: true
+        split: true
+
+  redis:
+    # Selects the Bitnami subchart instead of this chart's own standalone Redis
+    # — and the chart declares no such dependency, so true deploys no Redis at
+    # all. The chart's guard refuses that combination under scale-out, which
+    # these split collectors enable. Pinned so a values default change cannot
+    # reintroduce it.
+    enabled: false
+
+    auth:
+      # WITHOUT THIS THE QUEUE RUNS BEHIND A PASSWORD PUBLISHED IN THIS
+      # REPOSITORY. The chart's default redis.auth.password is a literal in its
+      # own values.yaml, and it renders into the Secret as both the client
+      # password and the server's requirepass directive. Pointing at the Secret
+      # Pulumi provisions stops the chart receiving, rendering or interpolating
+      # any password at all.
+      #
+      # Both key names are stated rather than left to the chart's defaults, so a
+      # default change cannot repoint them at keys the Secret does not carry.
+      # The two must stay mutually consistent, a burden the chart transfers to
+      # whoever supplies the Secret — secrets.go derives both from one value.
+      existingSecret: accretion-collector-redis-secrets
+      existingSecretPasswordKey: password
+      existingSecretConfKey: redis.conf
+
+  config:
+    database:
+      # Same fix, same Secret as the API release above. This chart's default key
+      # name is "password"; Pulumi's Secret names it db-password, so the key has
+      # to be named explicitly or every collector reads a key that is not there.
+      existingSecret: accretion-api-secrets
+      existingSecretKey: db-password
+
+accretion-discord:
+  # The chart is off by default (#94), so every deploy that wants the bot says
+  # so. Whether the release is created at all is a separate, per-stack decision
+  # (enableDiscord), the same shape as the collector's gate.
+  enabled: true
+
+  image:
+    # Same binary as accretion-api, different entrypoint.
+    repository: accretion-api
+    pullPolicy: Always
+
+  secret:
+    # Pulumi provisions accretion-discord-secrets itself. The chart's own Secret
+    # is built from plaintext values, and a bot token has no business in a
+    # checked-in file -- the loader refuses both this flag being true and any of
+    # those values being set.
+    create: false
+    name: accretion-discord-secrets
+
+  api:
+    # The bot's OWN API key, from the Secret Pulumi provisions.
+    #
+    # NOT the chart's default (accretion-api's client-keys Secret): the
+    # accretion-api chart only emits that Secret for identities declared with a
+    # PLAINTEXT key, and every identity on this path is hash-only, so it never
+    # exists here. The secretKeyRef is deliberately not optional, so pointing at
+    # it would fail the pod at rollout rather than 401 quietly.
+    secretName: accretion-discord-secrets
+    secretKey: api-key-accretion-discord
+
+    tls:
+      # Must move in lockstep with the API chart's config.api.tls.enabled. A bot
+      # dialing http:// into a TLS-only listener writes its bearer token onto
+      # the socket before the server's TLS alert tears the connection down, so a
+      # mismatch leaks the credential in the clear on every retry. Both default
+      # true; pinned here because the coupling is the kind that breaks silently.
+      enabled: true
+
+  # The model keys, by reference rather than by value. The chart wires these two
+  # env vars only when the plaintext is supplied as a value, which is the one
+  # thing that must not happen here, so they are declared as ordinary extra
+  # environment variables pointing at the same Pulumi-provisioned Secret.
+  env:
+    - name: ACCRETION_LLM_ANTHROPIC_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: accretion-discord-secrets
+          key: anthropic-api-key
+    - name: ACCRETION_LLM_OPENAI_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: accretion-discord-secrets
+          key: openai-api-key

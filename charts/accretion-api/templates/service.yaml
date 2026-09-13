@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "accretion-api.fullname" . }}
+  labels:
+    {{- include "accretion-api.labels" . | nindent 4 }}
+  {{- if and .Values.config.api.tls.enabled (eq (.Values.ingress.className | default "") "gce") }}
+  annotations:
+    # GKE only. The GCE load balancer speaks cleartext to the backend unless it
+    # is told the port is HTTPS, and the symptom is a 502 with nothing in any log
+    # explaining it — the LB sends plaintext into a TLS socket. The key is the
+    # Service PORT NAME, which is why the API port is named.
+    cloud.google.com/app-protocols: '{"api":"HTTPS"}'
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    {{- if .Values.config.api.enabled }}
+    - port: {{ .Values.service.port }}
+      targetPort: api
+      protocol: TCP
+      name: api
+    {{- end }}
+    {{- if .Values.config.ui.enabled }}
+    - port: {{ .Values.service.uiPort }}
+      targetPort: ui
+      protocol: TCP
+      name: ui
+    {{- end }}
+  selector:
+    {{- include "accretion-api.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: accretion-api

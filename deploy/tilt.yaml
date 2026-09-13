@@ -1,0 +1,195 @@
+# Central Helm values for every chart Tilt deploys.
+#
+# Nested by CHART NAME at the top level. The Tiltfile materialises each chart's
+# subtree at load time into build/tilt-values/<chart>.yaml and passes it to that
+# chart's release and no other. The set of top-level keys must equal the set of
+# charts Tilt deploys exactly: a key naming no chart, or a chart with no key,
+# fails the LOAD by name. Helm ignores unknown value keys silently, so a typo
+# here would otherwise configure nothing and say nothing — which is precisely
+# how mcpSecret.enabled and mcpSecret.url survived in the Tiltfile after #122
+# deleted the block they configured, and how the accretion-discord release kept
+# setting a database host for a bot that has no database connection.
+#
+# WHAT BELONGS HERE: every static setting the Tiltfile used to pass as an inline
+# --set flag. Sixteen for accretion-api, twelve for accretion-collector and nine
+# for accretion-discord, none of which any gate could see while they were
+# Starlark string concatenation.
+#
+# WHAT DOES NOT: anything Tilt computes, or reads from .env.
+#   - the image repository and tag Tilt injects, once per built image;
+#   - accretion-api's `apiKeys`, derived from .env by
+#     `scripts/make-secret.sh --print-identities`;
+#   - accretion-collector's config.k8s.namespaces, built from `ns_monitors`,
+#     which an operator overrides on the command line or in tilt_config.json;
+#   - accretion-discord's bot token, model key and guild ID, all from .env.
+# Those stay as --set flags in the Tiltfile. helm resolves --set AFTER --values,
+# so a flag always wins over anything written here — which is what makes it safe
+# for this file to name a value Tilt is going to overwrite.
+#
+# NO SECRET VALUE BELONGS IN THIS FILE. It is checked in, so the rule that keeps
+# credentials out of env.example and .envrc applies unchanged. That includes an
+# API-key HASH: a digest is credential material derived from a plaintext that
+# lives only in your .env, which is why the identities are derived at load
+# rather than declared here. deploy/pulumi.yaml refuses the same two shapes.
+
+# Kind-local development: the one environment where "localhost" is the right
+# hostname, the image is loaded into the node rather than pulled, and the
+# certificate is issued by a cert-manager installed into the same cluster.
+accretion-api:
+  image:
+    # The tag Tilt injects overrides this, so it is what a RENDER sees rather
+    # than what a deploy runs. Kept because `tilt alpha tiltfile-result` and the
+    # values matrix both render without Tilt's injection, and a chart default
+    # that moved off `latest` would silently change what they check.
+    tag: latest
+    # PINNED, not inherited. kind loads the locally built image into the node,
+    # so Always would make every rollout pull a tag that exists in no registry.
+    # The chart default agrees today — accretion-collector's values.yaml names
+    # the Tiltfile as the reason it does — and a default that agrees is still a
+    # default that can move.
+    pullPolicy: IfNotPresent
+
+  ingress:
+    enabled: true
+    # ingress-nginx, not "gce". The class decides more than routing:
+    # templates/service.yaml annotates the Service with
+    # cloud.google.com/app-protocols only under gce.
+    className: nginx
+    annotations:
+      # A GCE annotation, inert behind ingress-nginx. Carried across from the
+      # Tiltfile unchanged rather than dropped, because dropping it changes the
+      # rendered Ingress and that is a decision for whoever owns the local
+      # ingress story, not a side effect of moving values into a file.
+      kubernetes.io/ingress.allow-http: "true"
+      # Redundant with className above — templates/ingress.yaml derives
+      # kubernetes.io/ingress.class from it when the map does not already carry
+      # one, so the render is identical either way. Kept for the same reason,
+      # and noted so the next reader does not have to re-derive it.
+      # deploy/pulumi.yaml states only the annotation the chart cannot derive.
+      kubernetes.io/ingress.class: "nginx"
+    # localhost, reached through the Tiltfile's port-forward. The chart's
+    # default host list is empty because a default hostname is always someone
+    # else's.
+    hosts:
+      - host: localhost
+        paths:
+          - path: /
+            pathType: Prefix
+    managedCertificate:
+      # GKE-only, and this is a kind cluster: the ManagedCertificate kind does
+      # not exist here. TLS comes from cert-manager instead, below.
+      enabled: false
+
+  config:
+    api:
+      tls:
+        # TLS is ON locally, issued by the cert-manager the Tiltfile installs.
+        # The certificate carries localhost and 127.0.0.1 as SANs, which is what
+        # makes it verify through the port-forward rather than only in-cluster.
+        # Must move in lockstep with accretion-discord's api.tls.enabled below.
+        enabled: true
+        certManager:
+          enabled: true
+
+    llm:
+      ollama:
+        # Ollama runs on the workstation, not in the cluster (ollama.enabled is
+        # false below), so the pod reaches it through Docker's host gateway.
+        base_url: "http://host.docker.internal:11434"
+
+    database:
+      # The accretion-db release's subchart Service, addressed across
+      # namespaces: the database deliberately lives in its own `accretion-db`
+      # namespace so the collectors can ingest its telemetry without a
+      # log-amplification loop. The namespace is spelled out here because the
+      # Tiltfile spelled it out in the flag; it is not derived from the
+      # Tiltfile's db_namespace, and the two must be changed together.
+      host: accretion-db-postgresql.accretion-db.svc.cluster.local
+
+  # No in-cluster Ollama: it would pull a multi-gigabyte model image into a kind
+  # node to duplicate a server the developer is already running.
+  ollama:
+    enabled: false
+
+accretion-collector:
+  # The controller's image. Present for completeness rather than for effect: the
+  # controller is deployed only under scale-out, and nothing here is scaled —
+  # the same reason accretion-collector-redis-secret is absent from the
+  # Tiltfile's collector_shared_objects list.
+  collector:
+    image:
+      tag: latest
+      pullPolicy: IfNotPresent
+
+  dataCollector:
+    image:
+      tag: latest
+      pullPolicy: IfNotPresent
+    # Single-replica, which is also what keeps scaleOutEnabled false, so no
+    # controller and no Redis are deployed (#93). Scale either collector here
+    # and both come back — along with a Redis Secret, RBAC and Services that the
+    # Tiltfile does not name, which `make tiltfile-check` will then report as
+    # uncategorized objects rather than let them go unclaimed.
+    replicaCount: 1
+    autoscaling:
+      enabled: false
+
+  statusCollector:
+    image:
+      tag: latest
+      pullPolicy: IfNotPresent
+    replicaCount: 1
+    autoscaling:
+      enabled: false
+
+  config:
+    database:
+      host: accretion-db-postgresql.accretion-db.svc.cluster.local
+    llm:
+      ollama:
+        base_url: "http://host.docker.internal:11434"
+
+accretion-discord:
+  # The chart is off by default (#94), so every deploy that wants the bot says
+  # so. Whether the release is created AT ALL is a separate decision the
+  # Tiltfile makes from .env: with no bot token the pod could only
+  # CrashLoopBackOff, so the release is skipped entirely.
+  enabled: true
+
+  image:
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  api:
+    tls:
+      # Lockstep with accretion-api's config.api.tls.enabled above. A bot
+      # dialing http:// into a TLS-only listener writes its bearer token onto
+      # the socket before the server's TLS alert tears the connection down, so a
+      # mismatch leaks the credential in the clear on every retry.
+      enabled: true
+
+    # The bot's OWN credential, from the Secret scripts/make-secret.sh
+    # provisions out of .env — the same Secret name and key deploy/pulumi.yaml
+    # names, so the bot is pointed at one shape locally and in a cluster.
+    #
+    # NOT the chart's default (accretion-api's client-keys Secret): that chart
+    # emits it only for identities declared with a PLAINTEXT key, and every
+    # identity has been hash-only since #122, so it exists on no path any more.
+    # The secretKeyRef is deliberately not optional, so a wrong name here fails
+    # the pod at rollout rather than 401ing every call.
+    secretName: accretion-discord-secrets
+    secretKey: api-key-accretion-discord
+
+  config:
+    llm:
+      ollama:
+        base_url: "http://host.docker.internal:11434"
+
+# Deployed from chart defaults, deliberately. Declared so that the set of
+# top-level keys here is exactly the set of charts Tilt deploys from this
+# repository, with no exception for the guard to carve out — a renamed chart
+# then fails by name instead of being the one key nobody checks. cert-manager
+# and metrics-server are absent because they are installed from upstream repos
+# rather than from charts/.
+accretion-db: {}
+otel-collector: {}

@@ -1,0 +1,199 @@
+image:
+  repository: otel/opentelemetry-collector-contrib
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: "latest"
+
+# The OpenTelemetry Collector itself. It receives OTLP and fans it out to the
+# backends below and to accretion's trace worker. Turning it off removes the
+# collector, its Service, its ConfigMap and its RBAC (#94).
+otelCollector:
+  enabled: true
+
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  # OTLP gRPC port
+  port: 4317
+  # OTLP HTTP port
+  httpPort: 4318
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# Grafana Cloud Configuration (Optional)
+#
+# Enabling this defines the otlp/grafana exporter (see templates/configmap.yaml)
+# but does NOT put it in any pipeline, so it forwards nothing on its own. Add
+# otlp/grafana to the exporters of whichever pipelines you want forwarded --
+# config.service.pipelines.traces and/or .metrics below. The chart refuses to
+# render enabled=true with no pipeline naming it, rather than accepting
+# credentials and silently sending nothing.
+grafanaCloud:
+  enabled: false
+  # endpoint: "otlp-gateway-prod-us-east-0.grafana.net:4317"
+  # user: "YOUR_USER_ID"
+  # apiKey: "YOUR_API_KEY"
+
+# Local Observability Stack
+grafana:
+  enabled: true
+  image:
+    repository: grafana/grafana
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 3000
+
+tempo:
+  enabled: true
+  image:
+    repository: grafana/tempo
+    tag: 2.7.2
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    grpcPort: 4317
+    httpPort: 3200
+  storage:
+    size: 5Gi
+    storageClassName: standard
+
+loki:
+  enabled: true
+  image:
+    repository: grafana/loki
+    tag: 3.0.0
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 3100
+  storage:
+    size: 5Gi
+    storageClassName: standard
+
+prometheus:
+  enabled: true
+  image:
+    repository: prom/prometheus
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 9090
+
+# Accretion trace worker exporter target. The worker Service lives in the accretion
+# release namespace, which differs per environment (accretion-core locally;
+# accretion-staging/accretion-system in other envs). Override namespace per environment.
+accretionTraceWorker:
+  namespace: accretion-core
+
+# Configuration for the OpenTelemetry Collector
+config:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  processors:
+    batch:
+
+    # NOTE: the memory_limiter, the transform/strip-claimed-identity and
+    # k8sattributes processors, and the filter/accretion span filter are all
+    # rendered by the configmap template
+    # (templates/configmap.yaml), not from here. The filter has to name
+    # accretion's own release namespace, which is already declared once as
+    # .Values.accretionTraceWorker.namespace; `processors` is passed through
+    # verbatim by `toYaml`, so a value cannot interpolate it. Same reason the
+    # otlphttp/accretion exporter is rendered there. See the template for the
+    # full rationale.
+
+    tail_sampling/accretion:
+      decision_wait: 10s
+      # Cap the in-flight trace buffer. This processor only started holding data
+      # when the traces/accretion pipeline stopped dropping 100% of spans at the
+      # filter, so the contrib default (50,000 traces) had never been exercised —
+      # against this chart's 128Mi limit it is an OOMKill, not a buffer. Paired
+      # with the memory_limiter rendered ahead of it, an overload becomes
+      # backpressure on the receiver instead of a restart.
+      num_traces: 5000
+      policies:
+        - name: errors
+          type: status_code
+          status_code:
+            status_codes:
+              - ERROR
+        - name: high-latency
+          type: latency
+          latency:
+            threshold_ms: 500
+        - name: low-rate-sample
+          type: probabilistic
+          probabilistic:
+            sampling_percentage: 5
+
+  exporters:
+    debug:
+      verbosity: detailed
+
+    # Export to local Tempo (traces)
+    otlp/tempo:
+      endpoint: "otel-collector-tempo:4317"
+      tls:
+        insecure: true
+
+    # Export to local Prometheus (metrics)
+    prometheus:
+      endpoint: "0.0.0.0:8889"
+
+    # Export to local Loki (logs)
+    otlphttp/loki:
+      endpoint: "http://otel-collector-loki:3100/otlp"
+      tls:
+        insecure: true
+
+    # NOTE: the Accretion trace worker exporter (otlphttp/accretion) is rendered by the
+    # configmap template so its endpoint namespace can be set per environment
+    # via .Values.accretionTraceWorker.namespace (see values below).
+
+    # Export to Grafana Cloud (traces & metrics)
+    otlp/grafana:
+      endpoint: "otlp-gateway-prod-us-east-0.grafana.net:4317"
+      headers:
+        Authorization: "Basic <base64-encoded-username:password>"
+
+  service:
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [batch]
+        exporters: [debug, otlp/tempo]
+      traces/accretion:
+        receivers: [otlp]
+        # Order is load-bearing end to end: memory_limiter first (it is what
+        # applies backpressure), then strip-claimed-identity so a sender cannot
+        # pre-set the attribute k8sattributes is about to stamp, then
+        # k8sattributes, then filter/accretion — which reads the
+        # k8s.namespace.name those two produced. Moving the strip after
+        # k8sattributes silently re-opens namespace spoofing; see the processor
+        # comments in templates/configmap.yaml.
+        processors: [memory_limiter, transform/strip-claimed-identity, k8sattributes/accretion, filter/accretion, tail_sampling/accretion, batch]
+        exporters: [otlphttp/accretion]
+      logs:
+        receivers: [otlp]
+        processors: [batch]
+        exporters: [debug, otlphttp/loki]
+      metrics:
+        receivers: [otlp]
+        processors: [batch]
+        exporters: [debug, prometheus]

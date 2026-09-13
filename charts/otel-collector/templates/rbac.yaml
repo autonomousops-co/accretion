@@ -1,0 +1,50 @@
+{{- if .Values.otelCollector.enabled -}}
+{{/*
+The collector needs its own identity so the k8sattributes processor can resolve a
+sending pod's namespace from the connection's source IP (see the processor comment
+in configmap.yaml).
+
+This is the exact set that processor needs and nothing more. It runs an informer
+over pods, which needs list + watch — not get. It needs NO grant on namespaces:
+upstream only starts a namespace informer when namespace labels/annotations or the
+cluster UID are extracted, and this config extracts k8s.namespace.name and
+k8s.pod.name, both of which are read off the pod object itself. If someone later
+adds namespace labels/annotations to `extract.metadata`, the namespaces grant has
+to come back with it.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "otel-collector.fullname" . }}
+  labels:
+    {{- include "otel-collector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "otel-collector.fullname" . }}
+  labels:
+    {{- include "otel-collector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "otel-collector.fullname" . }}
+  labels:
+    {{- include "otel-collector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "otel-collector.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "otel-collector.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end -}}

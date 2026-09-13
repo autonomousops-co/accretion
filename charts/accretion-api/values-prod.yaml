@@ -1,0 +1,125 @@
+replicaCount: 3
+
+image:
+  repository: accretion-api
+  tag: stable
+  pullPolicy: Always
+
+# REPLACE THE HOSTNAMES BELOW. They are RFC 2606 reserved names, which nobody
+# can register, so this file renders and validates but serves nothing until you
+# put your own domain in. The apex and www forms must both appear under `hosts`
+# and under `managedCertificate.domains` — GCP issues the certificate for the
+# names listed there, so a name in one and not the other gets an Ingress that
+# routes to a certificate that does not cover it.
+#
+# globalStaticIP is the NAME of a global static IP you have already reserved in
+# your GCP project (`gcloud compute addresses create <name> --global`), not an
+# address. It must exist before the Ingress is created; GKE fails the Ingress if
+# it does not resolve.
+ingress:
+  enabled: true
+  className: "gce"
+  globalStaticIP: "accretion-api-ip"
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.allow-http: "false"
+  hosts:
+    - host: example.com
+      paths:
+        - path: /
+          pathType: Prefix
+    - host: www.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  managedCertificate:
+    enabled: true
+    domains:
+      - example.com
+      - www.example.com
+
+resources:
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+  requests:
+    cpu: 1000m
+    memory: 1Gi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+config:
+  server:
+    host: "0.0.0.0"
+
+  database:
+    # NOTE: if prod runs the accretion-db chart in-cluster, this must point at the
+    # accretion-db namespace (accretion-db-postgresql.accretion-db.svc.cluster.local). Left as-is
+    # pending confirmation of prod DB topology (managed Cloud SQL vs in-cluster).
+    host: "accretion-db-postgresql"
+    port: 5432
+    user: "postgres"
+    # SECURITY: never hardcode the prod database password in this file.
+    # Supply it at deploy time via one of:
+    #   helm ... --set-string config.database.password=$ACCRETION_DB_PASSWORD
+    #   or mount an existingSecret and reference it.
+    # The chart guard (templates/_validation.tpl, enabled by
+    # security.enforceStrongDbPassword below) refuses to render when this is
+    # empty or the insecure default "postgres".
+    password: ""
+    database: "accretion"
+    # verify-full authenticates the server against a trusted CA (protects against
+    # MITM). Requires the DB server CA certificate; point sslrootcert at the
+    # mounted CA bundle. Replace this placeholder path with the real CA mount.
+    sslmode: "verify-full"
+    sslrootcert: "/etc/accretion/tls/ca.crt"  # CA reference placeholder
+
+  logging:
+    level: "warn"
+    format: "json"
+
+# SECURITY: prod identities are supplied at deploy time, never checked in.
+# Left empty deliberately: the guard in templates/_validation.tpl refuses to
+# render an authenticated deployment with no identities, so a prod install must
+# name its callers explicitly. Supply hashes only — the plaintext must not enter
+# the Helm release:
+#
+#   printf '%s' "$KEY" | shasum -a 256
+#   helm ... --set-json 'apiKeys=[{"name":"accretion-mcp","hash":"<digest>","permissions":["read:memory"]}]'
+#
+# or point -f at an operator-managed values file. Give each caller only the
+# permissions it needs: read:memory for read-only clients, plus chat:query for
+# the ones that call /api/chat.
+apiKeys: []
+
+# Enforce a strong, operator-supplied database password in prod. When true, the
+# chart guard in templates/_validation.tpl fails the render if the password is
+# empty or the insecure default "postgres". Only prod sets this; dev/staging
+# leave it unset so their local defaults still template.
+security:
+  enforceStrongDbPassword: true
+  # Reject any apiKeys entry carrying a plaintext `key`: prod identities are
+  # hash-only so the plaintext never enters the Helm release.
+  forbidPlaintextAPIKeys: true
+
+postgresql:
+  enabled: true
+  auth:
+    # SECURITY: do not hardcode the postgres superuser password. Provide it via
+    # an existingSecret, or --set-string postgresql.auth.postgresPassword=... at
+    # deploy time. Left empty so the chart guard rejects the insecure default.
+    existingSecret: ""  # e.g. "accretion-db-credentials"
+    postgresPassword: ""
+    database: "accretion"
+  primary:
+    persistence:
+      size: 50Gi
+      annotations:
+        "helm.sh/resource-policy": "keep"
+
+ollama:
+  enabled: false

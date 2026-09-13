@@ -1,0 +1,6 @@
+{{/*
+Runs the chart's fail-closed guards. A _-prefixed file holds definitions only,
+so the guards need a rendered template to invoke them -- this one, which emits
+nothing itself. Mirrors accretion-api's validate-security.yaml.
+*/}}
+{{- include "accretion-collector.validate" . -}}

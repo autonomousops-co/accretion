@@ -1,0 +1,153 @@
+# OFF BY DEFAULT (#94).
+#
+# Discord is one of three front ends -- MCP, Discord and the HTTP API -- and the
+# MCP is the primary one. An operator using only the MCP was otherwise paying
+# for a bot that sits idle holding a Discord connection, and it needs a bot
+# token they may not have.
+#
+# To turn it on, it is one line:
+#   --set enabled=true --set secret.botToken=<your token>
+#
+# BREAKING CHANGE for existing releases (chart 0.3.0, #106). A values file
+# written before this key existed cannot contain it, so `helm upgrade` with
+# that file renders zero objects and Helm deletes the Deployment, Secret,
+# ServiceAccount and ConfigMap -- exit 0, no warning. Add `enabled: true` to
+# your values (or --set enabled=true) BEFORE upgrading. If it has already
+# happened, `helm rollback accretion-discord` restores the release; the bot
+# token survives in release history. The chart version moved from 0.2.x to
+# 0.3.0 for exactly this reason: a patch bump reads as a safe upgrade.
+enabled: false
+
+# Discord Gateway only allows one session per bot token; do not scale > 1
+replicaCount: 1
+
+# image.repository is shared with accretion-api (same binary, different entrypoint)
+image:
+  repository: accretion-api
+  tag: latest
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+resources:
+  # Measured usage is ~1m CPU / 34Mi — the bot holds a websocket and does very
+  # little else, so it is sized like a status worker rather than like the API.
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 25m
+    memory: 64Mi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# accretion-api connection. The bot no longer talks to Postgres directly; every
+# cluster query is routed through accretion-api over HTTP so there is a single
+# auth-enforced data path.
+api:
+  # In-cluster URL of the accretion-api service. When left empty the deployment
+  # derives it from the release namespace, the scheme from tls.enabled below, and
+  # the port from `port` below.
+  url: ""
+
+  # The accretion-api Service port. It MUST be stated explicitly rather than left
+  # to the URL scheme's default: accretion-api exposes one Service port (80 by
+  # default, `service.port` in that chart) and changes only the target's scheme
+  # when TLS is enabled — there is no port 443. Omitting it made the derived
+  # https:// URL resolve to :443 and the bot could not reach the API at all.
+  port: 80
+
+  # TLS to accretion-api. This defaults to true in lockstep with
+  # config.api.tls.enabled in the accretion-api chart. The two MUST move
+  # together: a bot dialing http:// into a TLS-only listener writes its
+  # `Authorization: Bearer <key>` onto the socket before the server's TLS alert
+  # tears the connection down, so a mismatch leaks the credential in the clear on
+  # every retry.
+  tls:
+    enabled: true
+    # The Secret holding the CA that signed the API's certificate — normally the
+    # one cert-manager issued into, whose ca.crt key this mounts. The name is
+    # `<accretion-api release fullname>-tls`, so it must be updated alongside a
+    # renamed accretion-api release. A wrong name fails closed (the volume never
+    # mounts and the pod stays Pending) rather than falling back to cleartext. It is mounted
+    # and passed as ACCRETION_API_CA_FILE so the bot VERIFIES the certificate.
+    # Leave empty for a publicly-trusted certificate, where the system pool is
+    # the right answer.
+    caSecretName: "accretion-api-tls"
+    caSecretKey: "ca.crt"
+    mountPath: /etc/accretion/tls
+  # The bot's OWN API key, not a shared one. scripts/make-secret.sh creates this
+  # Secret from ACCRETION_API_KEY_DISCORD in .env and gives the server only the
+  # SHA-256 digest, carried as the `accretion-discord` api_key_identity. The
+  # bot's agentic loop calls /api/chat, so that identity needs read:memory +
+  # chat:query.
+  #
+  # This default used to be `accretion-api-client-keys`, and pointed at nothing.
+  # That Secret is rendered by accretion-api ONLY for an identity declared with a
+  # plaintext `key`, and #122 made every identity hash-only — so no deploy path
+  # produces it any more. Both callers already override this (deploy/tilt.yaml
+  # and deploy/pulumi.yaml), which is why nothing was visibly broken; a bare
+  # `helm install accretion-discord` got a pod that never started, because the
+  # ref below is deliberately not optional.
+  #
+  # The same stale name broke `make test-functional` and a documented kubectl
+  # step before it was found here, so keep this pointing at a Secret something
+  # actually creates: `make-secret.sh --print-identities` names them.
+  secretName: "accretion-discord-secrets"
+  secretKey: "api-key-accretion-discord"
+
+# Application configuration
+config:
+  llm:
+    provider: "anthropic"
+    openai:
+      base_url: "https://api.openai.com/v1"
+      model: "gpt-4"
+    ollama:
+      base_url: "http://accretion-api-ollama:11434"
+      model: "llama3:8b"
+    anthropic:
+      base_url: ""  # Defaults to https://api.anthropic.com
+    embedding_model: "nomic-embed-text:latest"
+    chat_model: "claude-sonnet-5"
+
+  logging:
+    level: "debug"
+    format: "json"
+
+  telemetry:
+    enabled: true
+    endpoint: "otel-collector.obs.svc.cluster.local:4317"
+    sample_rate: 1.0
+    insecure: true
+    logs_enabled: true
+
+# Discord-specific configuration
+discord:
+  # DISCORD_BOT_TOKEN is required - set via secret
+  guildID: ""  # Optional: restrict to a specific guild
+
+# Secret configuration
+secret:
+  create: true
+  name: ""  # Defaults to fullname-secret
+  botToken: ""  # Set this or use an existing secret
+  anthropicApiKey: ""  # Required when provider is "anthropic"
+  openaiApiKey: ""  # Required for embeddings when provider is "anthropic"
+
+# RBAC settings (bot does not use the K8s API)
+rbac:
+  create: false
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# Additional environment variables
+env: []

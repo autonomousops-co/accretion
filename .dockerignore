@@ -1,0 +1,65 @@
+# Git and development files
+.git
+.gitignore
+.gitkeep
+*.md
+!prompts/
+LICENSE
+
+# Environment and configuration
+.env
+.env.*
+env.example
+config.yaml
+
+# Build artifacts and caches
+accretion-api
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+.DS_Store
+Thumbs.db
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.log
+
+# Kubernetes and deployment
+charts/
+deploy.sh
+k8s/
+*.yaml
+*.yml
+
+# Testing and CI
+coverage.txt
+coverage.html
+.coverage
+test-results/
+
+# Documentation
+docs/
+*.pdf
+
+# Old directory
+old/
+
+# Node modules (if any)
+node_modules/
+
+# Python (if any)
+__pycache__/
+*.pyc
+*.pyo

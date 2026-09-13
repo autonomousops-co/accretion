@@ -1,0 +1,144 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "accretion-db.fullname" . }}-schema
+  labels:
+    {{- include "accretion-db.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-1"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  schema.sql: |
+    CREATE EXTENSION IF NOT EXISTS vector;
+
+    -- unified_entries is RANGE-partitioned by `timestamp` (weekly partitions,
+    -- one per ISO week starting Monday). Partitioning lets old telemetry be
+    -- detached/dropped online (see the retention job) and gives partition pruning
+    -- on time-bounded queries.
+    --
+    -- NOTE: PostgreSQL requires the partition key (`timestamp`) to be part of
+    -- every PRIMARY KEY / UNIQUE constraint, so the surrogate PK is (id, timestamp)
+    -- and dedup uniqueness is (content_hash, timestamp). Every worker stamps a
+    -- deterministic, content-derived timestamp (real log time / object transition
+    -- time), so an unchanged record re-observed on a later poll or after a restart
+    -- yields the same (content_hash, timestamp) pair and dedupes. See the storage
+    -- doc (internal/database/README.md) → "Dedup".
+    --
+    -- This block only creates a partitioned table on a FRESH database. An existing
+    -- non-partitioned `unified_entries` is left untouched by CREATE TABLE IF NOT
+    -- EXISTS; migrate it with charts/accretion-db/migrations/001_partition_unified_entries.sql.
+    CREATE TABLE IF NOT EXISTS unified_entries (
+        id BIGSERIAL,
+        resource_type VARCHAR(50) NOT NULL,
+        namespace VARCHAR(255),
+        resource_name VARCHAR(255),
+        data JSONB NOT NULL,
+        timestamp TIMESTAMPTZ NOT NULL,
+        embedding vector(768),
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        content_hash VARCHAR(64),
+        PRIMARY KEY (id, timestamp),
+        UNIQUE (content_hash, timestamp)
+    ) PARTITION BY RANGE (timestamp);
+
+    -- Indexes declared on the partitioned parent propagate to every partition.
+    CREATE INDEX IF NOT EXISTS idx_unified_embedding ON unified_entries USING hnsw (embedding vector_cosine_ops);
+    CREATE INDEX IF NOT EXISTS idx_unified_timestamp ON unified_entries (timestamp);
+    CREATE INDEX IF NOT EXISTS idx_unified_resource_type ON unified_entries (resource_type);
+    CREATE INDEX IF NOT EXISTS idx_unified_namespace ON unified_entries (namespace);
+    CREATE INDEX IF NOT EXISTS idx_unified_data ON unified_entries USING GIN (data);
+
+    -- ensure_unified_entries_partition creates the WEEKLY partition containing
+    -- p_date if it does not already exist. Idempotent; safe to call repeatedly.
+    -- This is the hand-rolled stand-in for pg_partman (not available in the DB
+    -- image); the partition-maintenance CronJob calls it ahead of time, and it also
+    -- runs on each helm upgrade below so a buffer of partitions always exists.
+    --
+    -- Weeks are ISO weeks (date_trunc('week') = Monday 00:00). The partition is
+    -- named after that Monday as unified_entries_YYYYMMDD; the 8-digit date suffix
+    -- parses back with a plain to_date(...,'YYYYMMDD'), which the retention job
+    -- relies on (ISO week-number round-tripping via to_date is fragile).
+    --
+    -- If the DEFAULT partition already holds rows for that week, PostgreSQL
+    -- refuses the CREATE ("updated partition constraint for default partition
+    -- ... would be violated by some row") because it will not silently relocate
+    -- them. That happens whenever rows arrive before their week is pre-created
+    -- (a stalled CronJob, or an event-time timestamp older than the window). To
+    -- stay self-healing rather than wedging the maintenance job, detach the
+    -- default, create the partition, move the matching rows across, and reattach.
+    -- The whole function body is one transaction, so a failure rolls back with the
+    -- default still attached; the parent lock blocks (never drops) concurrent writes.
+    CREATE OR REPLACE FUNCTION ensure_unified_entries_partition(p_date date)
+    RETURNS void AS $$
+    DECLARE
+        week_start   date := date_trunc('week', p_date)::date;
+        week_end     date := (week_start + interval '1 week')::date;
+        part_name    text := format('unified_entries_%s', to_char(week_start, 'YYYYMMDD'));
+        default_name text;
+        has_rows     boolean := false;
+    BEGIN
+        IF to_regclass('public.' || part_name) IS NOT NULL THEN
+            RETURN;
+        END IF;
+
+        -- Locate the DEFAULT partition by its bound, not by a hardcoded name.
+        SELECT c.relname INTO default_name
+        FROM pg_inherits i
+        JOIN pg_class c ON c.oid = i.inhrelid
+        WHERE i.inhparent = 'unified_entries'::regclass
+          AND pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT';
+
+        IF default_name IS NOT NULL THEN
+            EXECUTE format(
+                'SELECT EXISTS (SELECT 1 FROM %I WHERE timestamp >= %L AND timestamp < %L)',
+                default_name, week_start, week_end) INTO has_rows;
+        END IF;
+
+        IF NOT has_rows THEN
+            EXECUTE format(
+                'CREATE TABLE %I PARTITION OF unified_entries FOR VALUES FROM (%L) TO (%L)',
+                part_name, week_start::text, week_end::text);
+            RETURN;
+        END IF;
+
+        EXECUTE format('ALTER TABLE unified_entries DETACH PARTITION %I', default_name);
+        EXECUTE format(
+            'CREATE TABLE %I PARTITION OF unified_entries FOR VALUES FROM (%L) TO (%L)',
+            part_name, week_start::text, week_end::text);
+        EXECUTE format(
+            'INSERT INTO unified_entries SELECT * FROM %I WHERE timestamp >= %L AND timestamp < %L',
+            default_name, week_start, week_end);
+        EXECUTE format(
+            'DELETE FROM %I WHERE timestamp >= %L AND timestamp < %L',
+            default_name, week_start, week_end);
+        EXECUTE format('ALTER TABLE unified_entries ATTACH PARTITION %I DEFAULT', default_name);
+    END;
+    $$ LANGUAGE plpgsql;
+
+    -- Only wire up partitions when unified_entries is actually partitioned. On a
+    -- not-yet-migrated existing DB it is a plain table and these are skipped.
+    DO $$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM pg_partitioned_table pt
+                   JOIN pg_class c ON c.oid = pt.partrelid
+                   WHERE c.relname = 'unified_entries') THEN
+            -- DEFAULT partition catches any timestamp outside an explicit monthly
+            -- partition (e.g. backfilled history) so inserts never fail. Detect an
+            -- existing default by its partition bound rather than by name, so we
+            -- never try to create a second one (Postgres allows only one, and the
+            -- migration may have created it under a different name).
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_inherits i
+                JOIN pg_class c ON c.oid = i.inhrelid
+                WHERE i.inhparent = 'unified_entries'::regclass
+                  AND pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT'
+            ) THEN
+                EXECUTE 'CREATE TABLE unified_entries_default PARTITION OF unified_entries DEFAULT';
+            END IF;
+            -- Pre-create last week..+4 weeks so writes always land in a bounded partition.
+            PERFORM ensure_unified_entries_partition((CURRENT_DATE + (n || ' week')::interval)::date)
+            FROM generate_series(-1, 4) AS g(n);
+        END IF;
+    END;
+    $$;

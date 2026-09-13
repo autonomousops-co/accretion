@@ -1,0 +1,166 @@
+# Example configuration for Accretion
+# Copy this file to config.yaml and customize as needed
+
+# The browser-facing surface: the web UI, its static assets, and the /auth/*
+# OAuth flow. Off by default — the primary interfaces are accretion-mcp and the
+# Discord bot, which authenticate by API key. Enabling this also requires
+# auth.oauth.* and a non-empty user whitelist.
+ui:
+  enabled: false
+  port: 8080
+
+api:
+  # The machine-facing listener: /api/* behind API keys, plus /api/health. What
+  # accretion-mcp, the Discord bot and any HTTP client talk to.
+  enabled: true
+  port: 41337
+  # HTTP response write deadline (Go duration). Bounds the whole handler, so it must
+  # cover /api/chat's non-streaming RAG LLM calls. Default 120s. Also settable via
+  # ACCRETION_API_WRITE_TIMEOUT.
+  write_timeout: "120s"
+  # In-process TLS termination for this listener.
+  #
+  # On by default. Fail-closed: with enabled=true and a missing or malformed
+  # keypair the process aborts at startup. It never falls back to cleartext, so a
+  # certificate problem is a crash you can see rather than an unencrypted
+  # listener you cannot. Set enabled: false where TLS terminates elsewhere.
+  #
+  # Every key here is also settable as ACCRETION_API_TLS_* (ENABLED, CERT_FILE,
+  # KEY_FILE, MIN_VERSION).
+  tls:
+    enabled: true
+    cert_file: ""
+    key_file: ""
+    # The CA a client verifies this listener against. Only needed for a private
+    # issuer; empty means the system trust store.
+    ca_file: ""
+    # Lowest TLS version accepted: "1.2" or "1.3". 1.2 is the floor — configuring
+    # 1.0 or 1.1 is refused rather than honoured (RFC 8996).
+    min_version: "1.2"
+
+server:
+  # Bind address shared by both listeners.
+  host: "0.0.0.0"
+
+database:
+  host: "localhost"
+  port: 5432
+  user: "postgres"
+  password: "postgres"
+  database: "accretion"
+  sslmode: "disable"
+
+llm:
+  provider: "ollama" # ollama, openai, or anthropic
+  openai:
+    api_key: "" # or set ACCRETION_LLM_OPENAI_API_KEY env var
+    base_url: "https://api.openai.com/v1"
+  ollama:
+    base_url: "http://localhost:11434"
+  anthropic:
+    api_key: "" # or set ACCRETION_LLM_ANTHROPIC_API_KEY env var
+    base_url: "" # leave empty for default
+  embedding_model: "nomic-embed-text:latest"
+  chat_model: "llama3:8b"
+
+k8s:
+  config_path: ""
+  namespaces: ["default"]
+  # Poll period of the event collector; informer resync period of the status
+  # collectors (#96), which watch rather than poll.
+  poll_interval: "30s"
+
+# Unified namespace scoping. Traces are scoped separately from the polled
+# sources above because they are push-based: they arrive from whoever is
+# instrumented, which a polling list cannot predict. "*" means every namespace;
+# accretion's own is subtracted from it by self_namespace (Exclude beats
+# Include), which is what stops RAG ingestion from re-ingesting the spans its
+# own embedding path emits.
+#
+# Do NOT leave this out. Without it the trace scope falls back to the legacy
+# trace_worker.namespaces key, which has no built-in default — so Include is
+# empty, which is read as EVERY namespace. You would get cluster-wide trace
+# ingestion by omission rather than by choice. self_namespace still excludes
+# accretion's own spans, so the feedback loop stays closed either way, but set
+# the scope you actually want explicitly.
+namespaces:
+  self_namespace: "accretion-core"
+  traces:
+    include: ["*"]
+
+logging:
+  level: "info"
+  format: "json"
+  frontend_level: "info"
+  disable_caller: false
+  disable_stacktrace: true
+
+# OpenTelemetry configuration
+telemetry:
+  enabled: false
+  endpoint: "localhost:4317"
+  service_name: "accretion-api"
+  sample_rate: 1.0
+  insecure: true
+  logs_enabled: true
+
+# Tempo trace backend
+tempo:
+  enabled: false
+  base_url: "http://localhost:3200"
+
+# Authentication configuration
+# Auth is on by default.
+auth:
+  oauth:
+    provider: "google"
+    client_id: "your-google-client-id"
+    client_secret: "your-google-client-secret"
+    redirect_url: "http://localhost:8080/auth/callback"
+    scopes: ["openid", "profile", "email"]
+    auth_url: "https://accounts.google.com/o/oauth2/auth"
+    token_url: "https://oauth2.googleapis.com/token"
+    user_info_url: "https://www.googleapis.com/oauth2/v2/userinfo"
+  # Hex ONLY, at least 64 hex characters (32 bytes).
+  # Generate with: openssl rand -hex 32
+  # `openssl rand -hex 16` is 32 characters but decodes to 16 bytes, and is rejected.
+  session_key: "replace-me-openssl-rand-hex-32"
+  cookie_domain: ""
+  cookie_secure: true # Set to false for localhost development
+
+  # API key authentication (for programmatic access). One named identity per
+  # client: only the hex SHA-256 digest of the key is configured, and each entry
+  # carries its own permissions, so callers are individually attributable and
+  # revocable. Permissions are matched exactly — there is no hierarchy.
+  # Generate a digest with: printf '%s' "$KEY" | shasum -a 256
+  # The chart renders this block from its `apiKeys` values list; see
+  # charts/accretion-api/values.yaml. Required when auth is enabled.
+  # The example hashes below are deliberately NOT valid hex, so an unedited copy
+  # of this file fails at startup rather than deploying identities that can never
+  # authenticate. Replace both with real digests.
+  api_key_identities:
+    - name: "accretion-mcp"
+      hash: "replace-me-sha256-hex-digest"
+      permissions: ["read:memory", "chat:query"]
+    - name: "ci"
+      hash: "replace-me-sha256-hex-digest"
+      permissions: ["read:memory"]
+
+  # User whitelist - ONLY these users can access the system
+  allowed_emails:
+    ["user1@example.com", "user2@contractor.com", "analyst@company.com"]
+  allowed_domains: ["trusted-domain.com"] # All users from @trusted-domain.com can access
+
+  # Admin permissions - users with these emails or domains get admin access
+  # NOTE: Admins are automatically whitelisted (don't need to be in allowed_emails)
+  admin_emails: ["admin@example.com", "devops@company.com"]
+  admin_domains: ["yourdomain.com"] # All users from @yourdomain.com get admin access
+
+# Environment variables can override config values:
+# ACCRETION_LLM_OPENAI_API_KEY - OpenAI API key
+# ACCRETION_LLM_ANTHROPIC_API_KEY - Anthropic API key
+# OAUTH_CLIENT_ID - OAuth client ID
+# OAUTH_CLIENT_SECRET - OAuth client secret
+# SESSION_KEY - Session encryption key (64+ hex chars; openssl rand -hex 32)
+# (API key identities are a struct list; viper has no env binding for one, so
+#  they come from this file only — the chart delivers them via its ConfigMap.)

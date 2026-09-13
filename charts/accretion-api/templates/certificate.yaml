@@ -1,0 +1,40 @@
+{{- $tls := .Values.config.api.tls }}
+{{- if and $tls.enabled $tls.certManager.enabled (not $tls.existingSecret) }}
+{{/*
+The serving certificate for the API listener. Issued either by the CA this chart
+bootstraps (issuer.yaml) or by an issuer the operator already runs.
+
+The resulting Secret carries tls.crt, tls.key and — because the issuer is a CA
+rather than a public authority — ca.crt, which is what lets every client verify
+instead of skipping verification.
+*/}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "accretion-api.fullname" . }}-tls
+  labels:
+    {{- include "accretion-api.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "accretion-api.tlsSecretName" . }}
+  duration: {{ $tls.certManager.duration | quote }}
+  renewBefore: {{ $tls.certManager.renewBefore | quote }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  usages:
+    - server auth
+  dnsNames:
+    {{- include "accretion-api.tlsDNSNames" . | nindent 4 }}
+  ipAddresses:
+    {{- include "accretion-api.tlsIPAddresses" . | nindent 4 }}
+  issuerRef:
+    {{- if $tls.certManager.issuerRef.name }}
+    name: {{ $tls.certManager.issuerRef.name }}
+    kind: {{ $tls.certManager.issuerRef.kind | default "Issuer" }}
+    group: {{ $tls.certManager.issuerRef.group | default "cert-manager.io" }}
+    {{- else }}
+    name: {{ include "accretion-api.fullname" . }}-ca
+    kind: Issuer
+    group: cert-manager.io
+    {{- end }}
+{{- end }}

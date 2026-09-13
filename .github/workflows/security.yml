@@ -1,0 +1,75 @@
+name: security
+
+# Runs on pull requests and weekly. The weekly run is the point: a new advisory
+# against a dependency nobody touched will not surface any other way.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 3 * * 0'
+
+# Least privilege: govulncheck and gosec only read the checkout. CodeQL, when it
+# is re-enabled, additionally needs `security-events: write` to upload results
+# and `actions: read` to fetch workflow run metadata.
+permissions:
+  contents: read
+
+jobs:
+  vulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      # Pinned, not @latest: an unpinned install means CI executes whatever the
+      # upstream published moments earlier, with no review. The vulnerability
+      # database is fetched at run time regardless, so pinning the tool costs no
+      # freshness.
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
+  gosec:
+    name: gosec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      # Vendored dependencies are excluded: they are not ours to fix, and left in
+      # they drown the signal — 3846 findings across the tree versus 0 in this
+      # codebase. LOW is skipped because it is almost entirely G104 (unhandled
+      # errors), which errcheck already governs under this project's own policy.
+      - name: install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+      - run: make security
+
+  # CodeQL is disabled until this repository is public.
+  #
+  # Code scanning requires GitHub Code Security, which on a private repository
+  # is a paid Advanced Security feature; the job failed with "Code Security must
+  # be enabled for this repository to use code scanning". It becomes available
+  # at no cost the moment the repo goes public, which is the same gate as
+  # private vulnerability reporting.
+  #
+  # To re-enable: uncomment this job and restore the two permissions it needs,
+  # noted in the permissions block above.
+  #
+  # codeql:
+  #   name: codeql
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-go@v5
+  #       with:
+  #         go-version-file: go.mod
+  #         cache-dependency-path: go.sum
+  #     - uses: github/codeql-action/init@v3
+  #       with:
+  #         languages: go
+  #     - uses: github/codeql-action/autobuild@v3
+  #     - uses: github/codeql-action/analyze@v3

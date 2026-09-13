@@ -1,0 +1,17 @@
+apiVersion: v2
+name: accretion-discord
+description: Discord bot for AI-powered Kubernetes log analysis
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+
+keywords:
+  - kubernetes
+  - ai
+  - discord
+  - bot
+  - monitoring
+
+maintainers:
+  - name: Accretion Team
+    email: maintainers@autonomousops.co

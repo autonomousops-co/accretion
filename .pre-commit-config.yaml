@@ -1,0 +1,124 @@
+repos:
+  # Standard hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        exclude: charts/
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+
+  # Go-based hooks (main module at the repo root)
+  - repo: https://github.com/tekwizely/pre-commit-golang
+    rev: v1.0.0-rc.2
+    hooks:
+      - id: go-mod-tidy
+        exclude: ^pulumi/
+      - id: go-test-mod
+        exclude: ^pulumi/
+      - id: go-vet-mod
+        exclude: ^pulumi/
+      - id: go-imports
+        args:
+          - "-w"
+          - "-local"
+          - "github.com/autonomousops-co"
+
+  # Deployment validation hooks (local)
+  - repo: local
+    hooks:
+      # Validate Helm charts before commit
+      - id: helm-lint-accretion-api
+        name: Helm Lint (accretion-api)
+        entry: helm lint ./charts/accretion-api
+        language: system
+        pass_filenames: false
+        files: '^charts/accretion-api/.*\.(yaml|yml|tpl)$'
+
+      - id: helm-lint-collector
+        name: Helm Lint (accretion-collector)
+        entry: helm lint ./charts/accretion-collector
+        language: system
+        pass_filenames: false
+        files: '^charts/accretion-collector/.*\.(yaml|yml|tpl)$'
+
+      # Go hooks for pulumi module
+      - id: pulumi-go-vet
+        name: Go Vet (pulumi)
+        entry: bash -c 'cd pulumi && go vet ./...'
+        language: system
+        pass_filenames: false
+        files: '^pulumi/.*\.go$'
+
+      - id: pulumi-golangci-lint
+        name: golangci-lint (pulumi)
+        entry: bash -c 'cd pulumi && golangci-lint run ./...'
+        language: system
+        pass_filenames: false
+        files: '^pulumi/.*\.go$'
+
+      # golangci-lint, enforcing exactly what CI enforces. --new-from-rev
+      # grandfathers the findings that predate the golangci-lint v2 migration:
+      # v1 cannot lint a Go 1.25 module at all, so the upgrade was forced, and it
+      # brought ~10 versions of new checks with it. Every changed line is still
+      # held to the full standard.
+      - id: golangci-lint-new
+        name: golangci-lint (changed code)
+        entry: make lint-new
+        language: system
+        types: [go]
+        exclude: ^(vendor|pulumi)/
+        pass_filenames: false
+
+      # Chart version discipline. Both are `local` system hooks: they read git
+      # history, so they must run against this repo's checkout, not pre-commit's
+      # isolated hook environment.
+      - id: helm-chart-version-bump
+        name: Helm chart version bumped
+        entry: scripts/check-chart-version-bump.sh
+        language: system
+        files: '^charts/[^/]+/'
+        exclude: '^charts/[^/]+/charts/'
+        # Pinned to commit time. Without an explicit stage pre-commit runs a
+        # hook at every default stage, including pre-push, where the file list
+        # spans every pushed commit while the comparison is still against HEAD
+        # — so any chart touched anywhere in the push reports "not bumped".
+        stages: [pre-commit]
+
+      - id: helm-chart-app-version
+        name: Helm chart appVersion matches release tag
+        entry: scripts/check-chart-app-version.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      # Security scanning with trivy (only on manual trigger)
+      - id: trivy-config
+        name: Trivy Config Scan
+        entry: trivy config --severity HIGH,CRITICAL .
+        language: system
+        pass_filenames: false
+        files: '^(charts/|pulumi/|kind-config\.yaml|Dockerfile|Tiltfile)'
+        stages: [manual]  # Only run when explicitly requested with --hook-stage manual
+
+      # Evaluate the Tiltfile with the collector on and off. The previous hook
+      # ran `tilt validate`, which is not a tilt command, and its `|| echo`
+      # fallback turned that into a pass on every commit (#101).
+      - id: tiltfile-check
+        name: Tiltfile evaluates (collector on and off)
+        entry: scripts/check-tiltfile.sh
+        language: system
+        pass_filenames: false
+        files: '^Tiltfile$'
+
+      # Validate kind-config.yaml
+      - id: kind-validate
+        name: Validate kind config
+        entry: bash -c 'kind create cluster --config kind-config.yaml --dry-run || echo "kind not installed, skipping validation"'
+        language: system
+        pass_filenames: false
+        files: '^kind-config\.yaml$'
+exclude: (^|/)vendor/

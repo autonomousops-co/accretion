@@ -1,0 +1,193 @@
+{{- if and .Values.collector.enabled .Values.collector.rbac.create (include "accretion-collector.scaleOutEnabled" .) }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "accretion-collector.fullname" . }}-collector
+  labels:
+    {{- include "accretion-collector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+rules:
+# Namespace listing backs label-selector / "*" namespace scoping (issue #146).
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "accretion-collector.fullname" . }}-collector
+  labels:
+    {{- include "accretion-collector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "accretion-collector.fullname" . }}-collector
+subjects:
+- kind: ServiceAccount
+  name: {{ include "accretion-collector.fullname" . }}-collector
+  namespace: {{ .Release.Namespace }}
+{{- end }}
+---
+{{- if and .Values.dataCollector.enabled .Values.dataCollector.rbac.create }}
+{{- $shared := include "accretion-collector.sharedDataCollectors" . | fromJsonArray }}
+{{- if $shared }}
+# The shared data-collector process gets exactly the rules the collectors still
+# inside it need -- see accretion-collector.dataCollectorRules. Splitting a
+# collector out removes its rules from here and puts them on that collector's
+# own role below, so `split` narrows this grant as well as scaling the workload.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "accretion-collector.fullname" . }}-data-collector
+  labels:
+    {{- include "accretion-collector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-collector
+rules:
+{{ include "accretion-collector.dataCollectorRules" (dict "root" . "collectors" $shared) }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "accretion-collector.fullname" . }}-data-collector
+  labels:
+    {{- include "accretion-collector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "accretion-collector.fullname" . }}-data-collector
+subjects:
+- kind: ServiceAccount
+  name: {{ include "accretion-collector.fullname" . }}-data-collector
+  namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- range $name := (include "accretion-collector.splitDataCollectors" . | fromJsonArray) }}
+---
+# A split-out collector runs alone, so it is granted only its own rules. For the
+# trace collector in particular this is the difference between an unauthenticated
+# OTLP listener that can read every container log in the cluster and one that
+# cannot.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "accretion-collector.fullname" $ }}-{{ $name }}-collector
+  labels:
+    {{- include "accretion-collector.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $name }}-collector
+rules:
+{{ include "accretion-collector.dataCollectorRules" (dict "root" $ "collectors" (list $name)) }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "accretion-collector.fullname" $ }}-{{ $name }}-collector
+  labels:
+    {{- include "accretion-collector.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $name }}-collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "accretion-collector.fullname" $ }}-{{ $name }}-collector
+subjects:
+- kind: ServiceAccount
+  name: {{ include "accretion-collector.fullname" $ }}-{{ $name }}-collector
+  namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}
+---
+{{- if and .Values.statusCollector.enabled .Values.statusCollector.rbac.create }}
+# One ClusterRole for the consolidated status collector, replacing the eight
+# per-worker roles it absorbed (#91). The rules stay gated on the individual
+# kind toggles rather than being granted as a blanket union: an operator who
+# turns off, say, configmap collection should stop granting read on ConfigMaps,
+# not merely stop using it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "accretion-collector.fullname" . }}-status-collector
+  labels:
+    {{- include "accretion-collector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: status-collector
+rules:
+# Namespace listing backs label-selector / "*" namespace scoping (issue #146).
+# It is unconditional because the namespace scope is resolved once for the whole
+# process, before any individual collector runs.
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list"]
+{{- if .Values.statusCollector.kinds.podStatus.enabled }}
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+{{- end }}
+{{- if .Values.statusCollector.kinds.nodeStatus.enabled }}
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch"]
+{{- end }}
+{{- if .Values.statusCollector.kinds.deploymentStatus.enabled }}
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch"]
+{{- end }}
+{{- if .Values.statusCollector.kinds.endpointHealth.enabled }}
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["get", "list", "watch"]
+{{- end }}
+{{- if .Values.statusCollector.kinds.pvcStatus.enabled }}
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims", "persistentvolumes"]
+  verbs: ["get", "list", "watch"]
+{{- end }}
+{{- if .Values.statusCollector.kinds.hpaStatus.enabled }}
+- apiGroups: ["autoscaling"]
+  resources: ["horizontalpodautoscalers"]
+  verbs: ["get", "list", "watch"]
+{{- end }}
+{{- if .Values.statusCollector.kinds.jobStatus.enabled }}
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "watch"]
+{{- end }}
+{{- if .Values.statusCollector.kinds.configmap.enabled }}
+# ConfigMap METADATA only: name, namespace, resourceVersion, creation time,
+# labels, and an allowlist of tooling annotations -- never .data or
+# .binaryData, and never a body-carrying annotation such as kubectl's
+# last-applied-configuration, which holds the applied ConfigMap in plaintext.
+#
+# NO RULE ON SECRETS, DELIBERATELY. Cluster secrets are out of scope for
+# monitoring, so no role in this chart grants any verb on them. Kubernetes has
+# no metadata-only read for a Secret -- list/watch return .data -- so
+# collecting their metadata would mean cluster-wide read of every secret value.
+# Accretion's own components still authenticate: the kubelet resolves their
+# credentials from Secrets via secretKeyRef, which needs no RBAC.
+# scripts/check-collector-rbac.sh fails if a secrets rule reappears.
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "accretion-collector.fullname" . }}-status-collector
+  labels:
+    {{- include "accretion-collector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: status-collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "accretion-collector.fullname" . }}-status-collector
+subjects:
+- kind: ServiceAccount
+  name: {{ include "accretion-collector.fullname" . }}-status-collector
+  namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scroll Test</title>
+    <style>
+        .test-container {
+            width: 500px;
+            height: 300px;
+            border: 2px solid #333;
+            margin: 20px;
+            overflow-y: scroll;
+            padding: 10px;
+            background: #f8fafc;
+        }
+        .test-content {
+            padding: 10px;
+            margin: 10px 0;
+            background: #e6f3ff;
+            border-radius: 8px;
+        }
+        button {
+            margin: 10px;
+            padding: 10px 20px;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+    <h2>Scroll Test</h2>
+    <button onclick="addContent()">Add Content</button>
+    <button onclick="scrollToBottom()">Scroll to Bottom</button>
+    <button onclick="clearContent()">Clear</button>
+
+    <div id="testContainer" class="test-container">
+        <div class="test-content">Initial content</div>
+    </div>
+
+    <script>
+        let messageCount = 1;
+        const container = document.getElementById('testContainer');
+
+        function addContent() {
+            messageCount++;
+            const div = document.createElement('div');
+            div.className = 'test-content';
+            div.textContent = `Message ${messageCount} - This is a test message to verify scrolling functionality. Lorem ipsum dolor sit amet, consectetur adipiscing elit.`;
+            container.appendChild(div);
+
+            console.log('Added content, scrolling...');
+            scrollToBottom();
+        }
+
+        function scrollToBottom() {
+            console.log('ScrollTop before:', container.scrollTop);
+            console.log('ScrollHeight:', container.scrollHeight);
+            console.log('ClientHeight:', container.clientHeight);
+
+            container.scrollTop = container.scrollHeight;
+
+            setTimeout(() => {
+                console.log('ScrollTop after:', container.scrollTop);
+            }, 50);
+        }
+
+        function clearContent() {
+            container.innerHTML = '<div class="test-content">Initial content</div>';
+            messageCount = 1;
+        }
+
+        // Auto-add content every 2 seconds for testing
+        function autoTest() {
+            addContent();
+            if (messageCount < 20) {
+                setTimeout(autoTest, 1000);
+            }
+        }
+
+        // Start auto test after 2 seconds
+        setTimeout(autoTest, 2000);
+    </script>
+</body>
+</html>

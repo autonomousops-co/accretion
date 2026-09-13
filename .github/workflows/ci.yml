@@ -1,0 +1,145 @@
+name: CI
+
+# The everyday gate. Every job here should be a required status check: a red run
+# means do not merge.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push to a PR makes the in-flight run obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # go.mod is the source: its `go` and `toolchain` directives are what
+          # actually govern every build, so CI cannot drift from them.
+          # .tool-versions is asdf's format and setup-go does not read it.
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - run: make test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: .cache/test/coverage.out
+          if-no-files-found: ignore
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # --new-from-rev needs history to diff against, and a shallow clone
+          # has none.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - run: make gofmt-check
+      - run: make vet
+      - name: golangci-lint (changed code only)
+        uses: golangci/golangci-lint-action@v7
+        with:
+          # Keep in step with GOLANGCI_VERSION in the Makefile.
+          version: v2.13.2
+          # Findings that predate the v2 migration are grandfathered: v1 cannot
+          # lint a Go 1.25 module at all, so the upgrade was forced and brought
+          # roughly ten versions of new checks with it. Every changed line is
+          # still held to the full standard.
+          args: --timeout=5m --new-from-rev=origin/main
+
+  deps:
+    name: dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      # Verifies go.mod/go.sum/vendor agree. Deliberately not deps-update, which
+      # would rewrite the very files it is meant to be checking.
+      - run: make deps-verify
+
+  charts:
+    name: charts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      # accretion-db pulls in the Bitnami postgres subchart, and a fresh runner
+      # has no repositories configured — this passes locally only because a
+      # developer's machine already has bitnami added.
+      - run: helm repo add bitnami https://charts.bitnami.com/bitnami
+      - run: helm dependency build ./charts/accretion-db
+      # One target, shared with `make ci`, so the two cannot diverge again:
+      # a gate wired into one but not the other is how values-minimal.yaml
+      # went a sprint without being rendered by anything CI ran (#102).
+      - run: make charts-check
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # scripts/version.sh reads git tags to stamp the binary.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - run: make build
+      - run: make build-mcp
+      - name: the image still builds from the relocated module
+        run: docker build --build-arg VERSION="$(bash scripts/version.sh)" -t accretion-api:ci .
+
+  pulumi:
+    name: pulumi
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          # A separate, unvendored module, so it needs its own cache key.
+          cache-dependency-path: pulumi/go.sum
+      # The tests below render both charts with exactly the values the releases
+      # receive. That check skips itself when helm is absent so a developer can
+      # still run `go test` without it, and fails instead of skipping when CI is
+      # set — so this step is what keeps it from passing vacuously here.
+      - uses: azure/setup-helm@v4
+      - working-directory: pulumi
+        run: go build ./...
+      - working-directory: pulumi
+        run: go vet ./...
+      # Covers the deploy/pulumi.yaml loader: the top-level-key guard, the
+      # refusal of credential material in that file, and the repository-root
+      # walk the absolute chart paths are built from. All three fail closed, and
+      # a gate nobody runs is not a gate.
+      - working-directory: pulumi
+        run: go test ./...
+      # This module was linted only by a pre-commit hook, which --no-verify and
+      # merges both bypass. No --new-from-rev: unlike the root module it has no
+      # grandfathered findings, so it is held to the full standard.
+      - name: golangci-lint (pulumi)
+        uses: golangci/golangci-lint-action@v7
+        with:
+          # Keep in step with GOLANGCI_VERSION in the Makefile.
+          version: v2.13.2
+          working-directory: pulumi
+          args: --timeout=5m

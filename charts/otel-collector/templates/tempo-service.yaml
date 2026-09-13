@@ -1,0 +1,23 @@
+{{- if .Values.tempo.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "otel-collector.fullname" . }}-tempo
+  labels:
+    {{- include "otel-collector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tempo
+spec:
+  type: {{ .Values.tempo.service.type }}
+  ports:
+    - port: {{ .Values.tempo.service.grpcPort }}
+      targetPort: 4317
+      protocol: TCP
+      name: otlp-grpc
+    - port: {{ .Values.tempo.service.httpPort }}
+      targetPort: 3200
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "otel-collector.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: tempo
+{{- end }}

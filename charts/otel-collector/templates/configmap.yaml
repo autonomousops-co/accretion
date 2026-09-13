@@ -1,0 +1,150 @@
+{{- if .Values.otelCollector.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "otel-collector.fullname" . }}-config
+  labels:
+    {{- include "otel-collector.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    receivers:
+      {{- toYaml .Values.config.receivers | nindent 6 }}
+    processors:
+      {{- toYaml .Values.config.processors | nindent 6 }}
+      # Turn an overload into backpressure on the OTLP receiver rather than an
+      # OOMKill. Percentages track the container limit (128Mi by default) instead
+      # of restating it, so raising `resources` raises this with it.
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 75
+        spike_limit_percentage: 20
+      # Delete any identity the SENDER claims, before k8sattributes stamps the
+      # real one. This is a security control, not tidying, and the two processors
+      # only work as a pair.
+      #
+      # k8sattributes' `pod_association: from: connection` decides WHICH POD TO
+      # LOOK UP. It does not decide what lands on the span: upstream writes every
+      # extracted attribute through a set-if-absent helper, so an attribute the
+      # sender already set is left verbatim. `from: connection` is therefore not,
+      # by itself, an authenticity guarantee.
+      #
+      # That matters because all three of our controls read this one string. A pod
+      # that sets `k8s.namespace.name: "tenant-a"` in its own OTLP resource would
+      # otherwise sail through the filter below (not nil, not accretion's
+      # namespace), and the trace worker's `include: ["*"]` admits tenant-a while
+      # `self_namespace` does not exclude it. One line of sender input would defeat
+      # the filter, the fail-closed nil condition, and the self-exclusion at once.
+      # Stripping first is what makes the stamped value connection-derived and
+      # `== nil` genuinely mean "unattributable".
+      #
+      # Deleting rather than trusting also means the guarantee does not depend on
+      # a third party's attribute-precedence rules, which this repo cannot pin
+      # (the processor ships inside the collector image, not as a Go dependency)
+      # and cannot test.
+      #
+      # COUPLED to k8sattributes' `extract.metadata` below: strip exactly what we
+      # stamp. Add an extracted attribute there, add a delete_key here.
+      transform/strip-claimed-identity:
+        error_mode: ignore
+        trace_statements:
+          - context: resource
+            statements:
+              # Context-prefixed on purpose: with `context: resource` the bare
+              # `attributes` form works, but the collector rewrites it at load and
+              # logs "please rewrite them accordingly" on every start.
+              - delete_key(resource.attributes, "k8s.namespace.name")
+              - delete_key(resource.attributes, "k8s.pod.name")
+      # Stamp k8s.namespace.name / k8s.pod.name from the SENDER'S POD IDENTITY,
+      # resolved by the API server from the connection's source IP. Runs directly
+      # after the strip above, and is load-bearing twice over:
+      #
+      #  1. Nothing else sets the attribute. internal/telemetry builds its
+      #     resource with service.name alone — no WithFromEnv, no detectors — and
+      #     no chart injects OTEL_RESOURCE_ATTRIBUTES via the downward API. Without
+      #     this processor k8s.namespace.name is absent, and every OTTL condition
+      #     naming it silently evaluates against nil.
+      #  2. With the strip in front of it, the recorded namespace is the one the
+      #     span actually came from. The collector Service is ClusterIP on
+      #     4317/4318 with no auth and no mTLS, so any pod in the cluster can push
+      #     spans; a sender-asserted namespace would be an attacker-chosen label on
+      #     attacker-chosen text that the trace worker embeds, persists, and later
+      #     surfaces into the assistant's LLM context — indirect prompt injection
+      #     plus embedding spend.
+      #
+      # TOPOLOGY CAVEATS — the transport half of the guarantee is real but
+      # conditional on there being one TCP hop from sender to collector. Neither
+      # of these is live today; both would break attribution silently:
+      #   - Flipping `service.type` to NodePort/LoadBalancer, or inserting a
+      #     DaemonSet agent or gateway hop, collapses every sender to a single
+      #     source IP, and every span gets attributed to that hop's namespace.
+      #   - Pod IPs are recycled. A pod deleted and its IP reused gives a brief
+      #     mis-attribution window.
+      # Attribution is also not authorization: it records who sent a span, it does
+      # not decide who may. With `include: ["*"]` a sender in a watched namespace
+      # needs no lie at all — bounding that is a NetworkPolicy on the receiver,
+      # tracked separately.
+      #
+      # Requires the pods read grant in templates/rbac.yaml.
+      k8sattributes/accretion:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.pod.name
+        pod_association:
+          - sources:
+              - from: connection
+      # Drop accretion's OWN spans and keep everything else. RAG ingestion emits
+      # spans via the embedding path, so ingesting them would feed back into
+      # itself.
+      #
+      # This used to be an allowlist of the single `dkjr` fixture namespace, which
+      # is no longer part of the default bring-up (see ../../DKJR.md) and emits no
+      # spans at all — so it dropped 100% of traffic.
+      #
+      # FAIL CLOSED. The nil condition is not redundant, and it only means anything
+      # because of the strip above: senders arrive unattributable for legitimate
+      # reasons — host-network pods are deliberately not IP-indexed upstream, and a
+      # pod can be deleted mid-flight or be out-of-cluster entirely — and with the
+      # attribute absent an equality test alone evaluates nil == "<ns>" to false
+      # and KEEPS the span. An unattributable span is exactly the one not to
+      # ingest. (Without the strip this condition would never fire for a spoofing
+      # sender, which is the whole reason the strip exists.) The allowlist form
+      # this replaced was fail-closed by accident; this is fail-closed on purpose.
+      #
+      # COUPLING: this is the first of two enforcement points. The second is the
+      # trace worker's own selector, from `config.namespaces.traces` in the
+      # accretion-collector chart. The loop-breaker of record is that selector's
+      # self-exclusion — TraceNamespaceSelector adds self_namespace to Exclude,
+      # Exclude beats Include, and the collector chart always renders
+      # self_namespace from .Release.Namespace — so accretion cannot ingest its own
+      # traces even if this literal goes stale in some environment. What THIS
+      # filter buys is dropping them before they cost a network hop, a
+      # tail-sampling buffer slot, and a worker wakeup. The two charts are separate
+      # Helm releases, so the value cannot be shared automatically. See #119.
+      filter/accretion:
+        traces:
+          span:
+            - 'attributes["http.route"] == "/api/health"'
+            - 'end_time_unix_nano - start_time_unix_nano < 3000000'
+            - 'resource.attributes["k8s.namespace.name"] == nil'
+            - 'resource.attributes["k8s.namespace.name"] == {{ .Values.accretionTraceWorker.namespace | quote }}'
+    exporters:
+      {{- toYaml .Values.config.exporters | nindent 6 }}
+      # Export to Accretion trace worker (traces for RAG ingestion). The worker
+      # Service lives in the accretion release namespace, which is templated so it
+      # can be set per environment.
+      otlphttp/accretion:
+        endpoint: http://accretion-collector-trace-worker.{{ .Values.accretionTraceWorker.namespace }}.svc.cluster.local:4318
+        tls:
+          insecure: true
+      {{- if .Values.grafanaCloud.enabled }}
+      otlp/grafana:
+        endpoint: {{ .Values.grafanaCloud.endpoint | quote }}
+        headers:
+          Authorization: "Basic {{ printf "%s:%s" .Values.grafanaCloud.user .Values.grafanaCloud.apiKey | b64enc }}"
+      {{- end }}
+    service:
+      {{- toYaml .Values.config.service | nindent 6 }}
+{{- end -}}

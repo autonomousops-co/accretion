@@ -1,0 +1,74 @@
+{{- if .Values.ollama.multiZone.enabled }}
+# External services for multi-zone Ollama discovery
+
+{{- if .Values.ollama.multiZone.externalInstances }}
+{{- range .Values.ollama.multiZone.externalInstances }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "accretion-api.fullname" $ }}-ollama-{{ .zone }}
+  labels:
+    {{- include "accretion-api.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: ollama-external
+    accretion-api.io/zone: {{ .zone }}
+spec:
+  type: ExternalName
+  externalName: {{ .host }}
+  ports:
+    - port: {{ .port | default 11434 }}
+      targetPort: {{ .port | default 11434 }}
+      protocol: TCP
+      name: http
+{{- end }}
+{{- else }}
+# Placeholder external services for potential Ollama instances in other zones
+# To use these, update the values.yaml with actual external instance details
+{{- range .Values.ollama.multiZone.zones }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "accretion-api.fullname" $ }}-ollama-{{ . }}
+  labels:
+    {{- include "accretion-api.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: ollama-external
+    accretion-api.io/zone: {{ . }}
+  annotations:
+    accretion-api.io/status: "placeholder"
+    accretion-api.io/description: "Configure externalInstances in values.yaml to activate"
+spec:
+  type: ClusterIP
+  clusterIP: None  # Headless - no endpoints until configured
+  ports:
+    - port: 11434
+      protocol: TCP
+      name: http
+{{- end }}
+{{- end }}
+
+---
+# Headless service for multi-zone Ollama discovery
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "accretion-api.fullname" . }}-ollama-multi-zone
+  labels:
+    {{- include "accretion-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama-discovery
+spec:
+  type: ClusterIP
+  clusterIP: None  # Headless service
+  ports:
+    - port: 11434
+      targetPort: 11434
+      protocol: TCP
+      name: http
+  # This service will be managed by endpoints to include healthy Ollama instances
+  # across zones
+
+# Note: Endpoints/EndpointSlices are automatically managed by Kubernetes
+# when Services have selectors. For manual endpoint management, use a controller
+# or operator that creates EndpointSlice resources (discovery.k8s.io/v1).
+
+{{- end }}

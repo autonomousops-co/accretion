@@ -1,0 +1,20 @@
+apiVersion: v2
+name: accretion-collector
+description: Distributed collector controller and workers for Accretion API observability platform
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - observability
+  - kubernetes
+  - monitoring
+  - logs
+  - metrics
+  - ai
+  - vector-search
+home: https://github.com/autonomousops-co/accretion
+sources:
+  - https://github.com/autonomousops-co/accretion
+maintainers:
+  - name: Accretion API Team
+    email: maintainers@autonomousops.co

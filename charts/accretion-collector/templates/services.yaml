@@ -1,0 +1,123 @@
+{{- if and .Values.collector.enabled (include "accretion-collector.scaleOutEnabled" .) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "accretion-collector.fullname" . }}-collector
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "accretion-collector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.collector.service.type }}
+  ports:
+    - port: {{ .Values.collector.service.port }}
+      targetPort: {{ .Values.collector.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "accretion-collector.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+---
+{{- end }}
+{{- if .Values.dataCollector.enabled }}
+{{- $shared := include "accretion-collector.sharedDataCollectors" . | fromJsonArray }}
+{{- if $shared }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "accretion-collector.fullname" . }}-data-collector
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "accretion-collector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-collector
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.dataCollector.service.type }}
+  ports:
+    - port: {{ .Values.dataCollector.service.port }}
+      targetPort: {{ .Values.dataCollector.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "accretion-collector.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: data-collector
+---
+{{- end }}
+{{- range $name := (include "accretion-collector.splitDataCollectors" . | fromJsonArray) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "accretion-collector.fullname" $ }}-{{ $name }}-collector
+  namespace: {{ $.Release.Namespace | quote }}
+  labels:
+    {{- include "accretion-collector.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $name }}-collector
+  {{- with $.Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $.Values.dataCollector.service.type }}
+  ports:
+    - port: {{ $.Values.dataCollector.service.port }}
+      targetPort: {{ $.Values.dataCollector.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "accretion-collector.selectorLabels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $name }}-collector
+---
+{{- end }}
+{{- if (index .Values.dataCollector.kinds "trace").enabled }}
+{{/*
+The OTLP receiver keeps the name accretion-collector-trace-worker: the
+otel-collector chart exports to it at a fixed address
+(charts/otel-collector/templates/configmap.yaml), so renaming it would make
+trace read-back inert. It selects on accretion.io/collects-traces rather than on
+a component label, which is what lets the trace collector move between the
+shared process and a split-out Deployment without the endpoint changing.
+
+Readiness: this Service publishes only ready pods, and /ready is the whole
+supervisor's verdict, so in a SHARED pod an unrelated collector failing three
+probes would pull the OTLP endpoint out of Endpoints until that sibling earned
+a healthy run (#104). The chart avoids that by shipping trace split out
+(values.yaml kinds.trace.split), where the pod supervises nothing but the
+trace receiver and /ready is trace-specific by construction. That is
+preferred over publishNotReadyAddresses, which would also route spans to a
+pod whose listener is genuinely down or still starting.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "accretion-collector.fullname" . }}-trace-worker
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "accretion-collector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: trace-receiver
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.dataCollector.service.type }}
+  ports:
+    - port: {{ .Values.dataCollector.service.port }}
+      targetPort: {{ .Values.dataCollector.service.targetPort }}
+      protocol: TCP
+      name: http
+    - port: 4318
+      targetPort: 4318
+      protocol: TCP
+      name: otlp-http
+  selector:
+    {{- include "accretion-collector.selectorLabels" . | nindent 4 }}
+    accretion.io/collects-traces: "true"
+{{- end }}
+{{- end }}

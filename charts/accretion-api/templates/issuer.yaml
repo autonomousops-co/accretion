@@ -1,0 +1,62 @@
+{{- if eq (include "accretion-api.tlsBootstrapCA" .) "true" }}
+{{/*
+Bootstrapping a private CA with cert-manager takes three objects, in this order:
+
+  1. a SelfSigned Issuer, which can sign exactly one thing — a self-signed cert;
+  2. a CA Certificate signed by it, landing in a Secret;
+  3. a CA Issuer backed by that Secret, which signs the serving certificate.
+
+The two-issuer hop is not redundant. A SelfSigned issuer cannot sign a leaf for
+someone else, so without the CA in the middle the serving certificate would have
+no chain and no ca.crt for clients to verify against — which is the whole point
+of issuing one here rather than skipping verification everywhere.
+
+Operators who already run an issuer set config.api.tls.certManager.issuerRef, and
+none of this renders.
+*/}}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "accretion-api.fullname" . }}-selfsigned
+  labels:
+    {{- include "accretion-api.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "accretion-api.fullname" . }}-ca
+  labels:
+    {{- include "accretion-api.labels" . | nindent 4 }}
+spec:
+  isCA: true
+  commonName: {{ include "accretion-api.fullname" . }}-ca
+  secretName: {{ include "accretion-api.tlsCASecretName" . }}
+  {{/*
+  The CA gets its OWN, much longer lifetime. Giving it the leaf's duration
+  leaves no slack: the CA and every certificate it signed would expire on the
+  same schedule, so one missed renewal takes down the whole chain at once — and
+  because the probes verify against this CA too, every pod CrashLoops
+  simultaneously rather than one client failing first.
+  */}}
+  duration: {{ .Values.config.api.tls.certManager.caDuration | quote }}
+  renewBefore: {{ .Values.config.api.tls.certManager.caRenewBefore | quote }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: {{ include "accretion-api.fullname" . }}-selfsigned
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "accretion-api.fullname" . }}-ca
+  labels:
+    {{- include "accretion-api.labels" . | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ include "accretion-api.tlsCASecretName" . }}
+{{- end }}

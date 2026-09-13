@@ -1,0 +1,18 @@
+config:
+  gcp:project: accretion-api-staging
+  gcp:region: us-central1
+  gcp:zone: us-central1-a
+  accretion-infrastructure:environment: staging
+  accretion-infrastructure:clusterName: accretion-api-staging
+  accretion-infrastructure:namespace: accretion-staging
+  accretion-infrastructure:machineType: e2-standard-2
+  accretion-infrastructure:nodeCount: 2
+  accretion-infrastructure:minNodes: 2
+  accretion-infrastructure:maxNodes: 5
+  accretion-infrastructure:diskSizeGb: "100"
+  accretion-infrastructure:domain: staging.accretion-api.dev
+  accretion-infrastructure:enableCollector: "true"
+  accretion-infrastructure:imageTag: latest
+  accretion-infrastructure:dbInstanceTier: db-custom-1-3840
+  accretion-infrastructure:dbDiskSizeGb: "50"
+  accretion-infrastructure:dbHighAvailability: "false"

@@ -1,0 +1,25 @@
+{{- $isGCP := false }}
+{{- if .Values.ollama.autoDetectGCP }}
+  {{- $isGCP = or (contains "gke" (toString .Values.global.cluster)) (contains "gcp" (toString .Values.global.cluster)) (contains "google" (toString .Values.global.cluster)) }}
+{{- end }}
+{{- if or .Values.ollama.enabled $isGCP }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "accretion-api.fullname" . }}-ollama-loadbalancer
+  labels:
+    {{- include "accretion-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama-loadbalancer
+spec:
+  type: ClusterIP
+  ports:
+    - port: 11434
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "accretion-api.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama
+
+{{- end }}

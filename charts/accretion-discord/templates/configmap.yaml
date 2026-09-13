@@ -1,0 +1,37 @@
+{{- if .Values.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "accretion-discord.fullname" . }}-config
+  labels:
+    {{- include "accretion-discord.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    llm:
+      provider: {{ .Values.config.llm.provider | quote }}
+      openai:
+        base_url: {{ .Values.config.llm.openai.base_url | quote }}
+        model: {{ .Values.config.llm.openai.model | quote }}
+      ollama:
+        base_url: {{ .Values.config.llm.ollama.base_url | quote }}
+        model: {{ .Values.config.llm.ollama.model | quote }}
+      {{- if .Values.config.llm.anthropic }}
+      anthropic:
+        {{- if .Values.config.llm.anthropic.base_url }}
+        base_url: {{ .Values.config.llm.anthropic.base_url | quote }}
+        {{- end }}
+      {{- end }}
+      embedding_model: {{ .Values.config.llm.embedding_model | quote }}
+      chat_model: {{ .Values.config.llm.chat_model | quote }}
+
+    logging:
+      level: {{ .Values.config.logging.level | quote }}
+      format: {{ .Values.config.logging.format | quote }}
+
+    telemetry:
+      enabled: {{ .Values.config.telemetry.enabled }}
+      endpoint: {{ .Values.config.telemetry.endpoint | quote }}
+      sample_rate: {{ .Values.config.telemetry.sample_rate }}
+      insecure: {{ .Values.config.telemetry.insecure }}
+      logs_enabled: {{ .Values.config.telemetry.logs_enabled }}
+{{- end -}}

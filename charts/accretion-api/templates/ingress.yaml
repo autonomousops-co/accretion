@@ -1,0 +1,121 @@
+{{- if .Values.ingress.enabled -}}
+{{- $fullName := include "accretion-api.fullname" . -}}
+{{- $apiEnabled := .Values.config.api.enabled -}}
+{{- $uiEnabled := .Values.config.ui.enabled -}}
+{{- $apiPort := .Values.service.port -}}
+{{- $uiPort := .Values.service.uiPort -}}
+{{/*
+Since the listeners split, one backend port is no longer right for every path.
+The Service exposes a port per enabled listener, and routing everything at the API
+port sends browsers to a listener that 404s /, /static/** and /auth/*.
+
+With only one listener enabled every path goes to it. With both, /api is emitted
+ahead of the configured paths and points at the API listener, while the configured
+paths point at the UI — the more specific prefix wins, so /api/* reaches the API and
+everything else reaches the browser surface.
+*/}}
+{{- $defaultPort := $apiPort -}}
+{{- if and $uiEnabled (not $apiEnabled) -}}
+{{- $defaultPort = $uiPort -}}
+{{- else if and $uiEnabled $apiEnabled -}}
+{{- $defaultPort = $uiPort -}}
+{{- end -}}
+{{/*
+Annotations are assembled into a local before anything is emitted, because more
+than one thing can put something in the block and none of them may depend on
+another having gone first.
+
+Collected here rather than mutating .Values so a nulled ingress.annotations is a
+missing map rather than a template error, and so this template does not leave a
+key behind in .Values for whatever renders next.
+*/}}
+{{- $annotations := deepCopy (.Values.ingress.annotations | default dict) }}
+{{- if and .Values.ingress.className (not (hasKey $annotations "kubernetes.io/ingress.class")) }}
+{{- $_ := set $annotations "kubernetes.io/ingress.class" .Values.ingress.className }}
+{{- end }}
+{{/*
+The GKE managed-certificate and static-IP annotations used to be emitted INSIDE
+a `with .Values.ingress.annotations` block, which had TWO distinct failure modes
+depending on whether a class was set. Measured on the sprint-13 base, with
+managedCertificate.enabled true throughout:
+
+  className "gce", annotations nulled  render ERROR at ingress.yaml:23:57 —
+                                       the old code mutated .Values.ingress.
+                                       annotations in place, and `hasKey` on a
+                                       nil map is fatal.
+  className "",    annotations nulled  0 GKE annotations, silently. The
+                                       ManagedCertificate rendered and was never
+                                       attached; the static IP was never bound.
+                                       The Ingress comes up on an ephemeral
+                                       address serving no certificate, which is
+                                       visible only from the cloud console.
+  className "gce", default annotations 2 annotations — which is how the chart
+                                       shipped, so NO caller was broken on the
+                                       tree as it stood.
+
+The last row is the important one: this was latent, not live. It became
+reachable only because #118 emptied the defaults, so fixing it is what makes
+emptying them safe rather than a regression — with the old template, Pulumi's
+render would have become a hard error, not merely a detached certificate.
+
+Both annotations are now driven by the value that implies them rather than by
+whether the operator supplied an unrelated map, and all three cases above
+produce the same two annotations.
+*/}}
+{{- if .Values.ingress.managedCertificate.enabled }}
+{{- $_ := set $annotations "networking.gke.io/managed-certificates" (printf "%s-ssl-cert" (include "accretion-api.fullname" .)) }}
+{{- $_ := set $annotations "kubernetes.io/ingress.global-static-ip-name" (.Values.ingress.globalStaticIP | default (printf "%s-ip" (include "accretion-api.fullname" .))) }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}
+  labels:
+    {{- include "accretion-api.labels" . | nindent 4 }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- range . }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      {{- if .secretName }}
+      secretName: {{ .secretName }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- if and $apiEnabled $uiEnabled }}
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  number: {{ $apiPort }}
+          {{- end }}
+          {{- range .paths }}
+          - path: {{ .path }}
+            {{- if .pathType }}
+            pathType: {{ .pathType }}
+            {{- end }}
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  number: {{ $defaultPort }}
+          {{- end }}
+    {{- end }}
+{{- end }}

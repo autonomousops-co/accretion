@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minimal Scroll Test - Exact Copy</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 20px;
+            background: #f0f0f0;
+        }
+
+        .response-area {
+            flex: 1;
+            border: 2px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 20px;
+            background: #f8fafc;
+            overflow-y: scroll !important;
+            min-height: 400px;
+            max-height: calc(100vh - 200px);
+            scroll-behavior: smooth;
+            scrollbar-gutter: stable;
+            position: relative;
+            box-sizing: border-box;
+            width: 500px;
+        }
+
+        .message {
+            margin-bottom: 25px;
+            padding: 15px 20px;
+            border-radius: 12px;
+            line-height: 1.6;
+        }
+
+        .assistant-message {
+            background: #f0f9ff;
+            border-left: 4px solid #22c55e;
+            margin-right: 20px;
+        }
+
+        .message-label {
+            font-weight: 600;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            opacity: 0.7;
+            color: #22c55e;
+        }
+
+        .message-content {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        button {
+            margin: 10px;
+            padding: 10px 20px;
+            font-size: 16px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+
+        .debug-info {
+            background: #333;
+            color: #0f0;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            border-radius: 4px;
+            margin: 10px 0;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <h2>🧪 Minimal Scroll Test - Exact Copy of Accretion Structure</h2>
+
+    <button onclick="addMessage()">Add Message</button>
+    <button onclick="testScroll()">Test Scroll</button>
+    <button onclick="clearMessages()">Clear</button>
+    <button onclick="addMany()">Add 20 Messages</button>
+
+    <div id="debugInfo" class="debug-info">Debug info will appear here...</div>
+
+    <div id="responseArea" class="response-area" data-response-area>
+        <div class="message assistant-message">
+            <div class="message-label">Initial</div>
+            <div class="message-content">Welcome! This is a minimal test of the exact scroll structure used in Accretion.</div>
+        </div>
+    </div>
+
+    <script>
+        let messageCount = 1;
+        const responseArea = document.getElementById('responseArea');
+        const debugInfo = document.getElementById('debugInfo');
+
+        function log(message) {
+            console.log(message);
+            debugInfo.innerHTML += message + '\n';
+            debugInfo.scrollTop = debugInfo.scrollHeight;
+        }
+
+        function addMessage() {
+            messageCount++;
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message assistant-message';
+            messageDiv.innerHTML = `
+                <div class="message-label">Message ${messageCount}</div>
+                <div class="message-content">This is test message ${messageCount}. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.</div>
+            `;
+
+            responseArea.appendChild(messageDiv);
+            log(`Added message ${messageCount}`);
+
+            // Test scroll immediately
+            forceScrollToBottom();
+        }
+
+        function forceScrollToBottom() {
+            log('=== SCROLL ATTEMPT ===');
+            log(`Before: scrollTop=${responseArea.scrollTop}, scrollHeight=${responseArea.scrollHeight}, clientHeight=${responseArea.clientHeight}`);
+
+            // Method 1: Direct assignment
+            const target = responseArea.scrollHeight - responseArea.clientHeight;
+            responseArea.scrollTop = target;
+            log(`Method 1: Set scrollTop to ${target}, result: ${responseArea.scrollTop}`);
+
+            // Method 2: scroll() method
+            responseArea.scroll({ top: responseArea.scrollHeight, behavior: 'auto' });
+            log(`Method 2: Used scroll() method`);
+
+            // Check if it worked
+            setTimeout(() => {
+                const final = responseArea.scrollTop;
+                const max = responseArea.scrollHeight - responseArea.clientHeight;
+                const success = Math.abs(final - max) < 5;
+                log(`Final position: ${final}/${max} - ${success ? 'SUCCESS' : 'FAILED'}`);
+                log('==================');
+            }, 100);
+        }
+
+        function testScroll() {
+            log('=== COMPREHENSIVE TEST ===');
+            log(`Element: ${responseArea.tagName}#${responseArea.id}`);
+            log(`Classes: ${responseArea.className}`);
+
+            const styles = window.getComputedStyle(responseArea);
+            log(`Computed overflow-y: ${styles.overflowY}`);
+            log(`Computed height: ${styles.height}`);
+            log(`Computed max-height: ${styles.maxHeight}`);
+
+            log(`ScrollTop: ${responseArea.scrollTop}`);
+            log(`ScrollHeight: ${responseArea.scrollHeight}`);
+            log(`ClientHeight: ${responseArea.clientHeight}`);
+            log(`OffsetHeight: ${responseArea.offsetHeight}`);
+
+            const canScroll = responseArea.scrollHeight > responseArea.clientHeight;
+            log(`Can scroll: ${canScroll}`);
+
+            if (canScroll) {
+                forceScrollToBottom();
+            } else {
+                log('Cannot scroll - content fits in container');
+            }
+        }
+
+        function clearMessages() {
+            responseArea.innerHTML = `
+                <div class="message assistant-message">
+                    <div class="message-label">Initial</div>
+                    <div class="message-content">Welcome! This is a minimal test of the exact scroll structure used in Accretion.</div>
+                </div>
+            `;
+            messageCount = 1;
+            debugInfo.innerHTML = 'Cleared messages...\n';
+            log('Messages cleared');
+        }
+
+        function addMany() {
+            log('Adding 20 messages rapidly...');
+            for (let i = 0; i < 20; i++) {
+                setTimeout(() => {
+                    addMessage();
+                }, i * 200);
+            }
+        }
+
+        // Auto-test on load
+        setTimeout(() => {
+            log('=== AUTO TEST ON LOAD ===');
+            testScroll();
+        }, 1000);
+    </script>
+</body>
+</html>

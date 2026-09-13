@@ -1,0 +1,21 @@
+{{- if and .Values.statusCollector.enabled .Values.statusCollector.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "accretion-collector.fullname" . }}-status-collector
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "accretion-collector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: status-collector
+spec:
+  {{- if .Values.statusCollector.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ .Values.statusCollector.podDisruptionBudget.minAvailable }}
+  {{- end }}
+  {{- if .Values.statusCollector.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.statusCollector.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "accretion-collector.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: status-collector
+{{- end }}

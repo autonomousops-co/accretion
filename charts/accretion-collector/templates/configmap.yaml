@@ -1,0 +1,183 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "accretion-collector.fullname" . }}-config
+  labels:
+    {{- include "accretion-collector.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    database:
+      host: {{ .Values.config.database.host | quote }}
+      port: {{ .Values.config.database.port }}
+      user: {{ .Values.config.database.user | quote }}
+      # password intentionally omitted: supplied at runtime via the
+      # ACCRETION_DATABASE_PASSWORD env var (secretKeyRef against
+      # postgresql-secret) so it is never written into this ConfigMap. See
+      # templates/secrets.yaml and internal/config/config.go (bindEnvVars).
+      database: {{ .Values.config.database.database | quote }}
+      sslmode: {{ .Values.config.database.sslmode | quote }}
+
+    queue:
+      # "inprocess" (the default single-replica path) runs the dispatcher inside
+      # the collector process and delivers work over channels, so no controller
+      # pod and no Redis are deployed. Scaling any collector flips this to
+      # "redis" and brings both back -- one expression, no separate flag. See
+      # accretion-collector.queueMode.
+      mode: {{ include "accretion-collector.queueMode" . | quote }}
+      redis_addr: {{ .Release.Name }}-redis-master:{{ .Values.config.redis.port }}
+      # redis_password intentionally omitted: supplied at runtime via the
+      # ACCRETION_QUEUE_REDIS_PASSWORD env var (secretKeyRef against
+      # redis-secret) so it is never written into this ConfigMap. See
+      # templates/secrets.yaml and internal/config/config.go (bindEnvVars).
+      redis_db: {{ .Values.config.redis.database }}
+
+    llm:
+      provider: {{ .Values.config.llm.provider | quote }}
+      openai:
+        base_url: {{ .Values.config.llm.openai.base_url | quote }}
+        model: {{ .Values.config.llm.openai.model | quote }}
+      ollama:
+        base_url: {{ .Values.config.llm.ollama.base_url | quote }}
+        model: {{ .Values.config.llm.ollama.model | quote }}
+      embedding_model: {{ .Values.config.llm.embedding_model | quote }}
+
+    k8s:
+      config_path: ""
+      namespaces:
+        {{- range .Values.config.k8s.namespaces }}
+        - {{ . | quote }}
+        {{- end }}
+        # accretion's own namespace is NOT monitored by default. The loop-safe
+        # machinery from #145 stays intact (see namespaces.self_namespace below):
+        # if an operator opts in by adding the release namespace to the watched
+        # set, metrics/status/events are ingested but its logs remain excluded, so
+        # the amplification loop stays closed. Left off here per an explicit
+        # "do not monitor accretion-core" decision.
+      poll_interval: {{ .Values.config.k8s.poll_interval | quote }}
+
+    trace_worker:
+      namespaces:
+        {{- range .Values.config.traceWorker.namespaces }}
+        - {{ . | quote }}
+        {{- end }}
+
+    # Unified namespace scoping (#146). Empty include lists fall back to the
+    # legacy k8s.namespaces / trace_worker.namespaces above.
+    {{- with .Values.config.namespaces }}
+    namespaces:
+      # self_namespace (#145) is excluded from the LOG selector only. accretion's own
+      # namespace is NOT in the watched set by default (see k8s.namespaces above),
+      # so it is not monitored at all. self_namespace stays set so that IF an
+      # operator opts in — by adding the release namespace to the watched set —
+      # its logs remain excluded and the amplification loop stays closed. Helm's
+      # `default` treats "" as empty, so this always renders the release namespace
+      # unless selfNamespace is explicitly set.
+      self_namespace: {{ .selfNamespace | default $.Release.Namespace | quote }}
+      # include may contain the "*" sentinel (all namespaces); include_labels /
+      # exclude_labels are Kubernetes label-selector strings, OR-matched (#146).
+      include:
+        {{- range .include }}
+        - {{ . | quote }}
+        {{- end }}
+      exclude:
+        {{- range .exclude }}
+        - {{ . | quote }}
+        {{- end }}
+      include_labels:
+        {{- range .include_labels }}
+        - {{ . | quote }}
+        {{- end }}
+      exclude_labels:
+        {{- range .exclude_labels }}
+        - {{ . | quote }}
+        {{- end }}
+      # How often label/"*" scoping is re-resolved, so a namespace created after a
+      # worker starts comes into scope without a restart (#152). "0" pins the
+      # startup snapshot. Name-only configs never resolve and ignore this.
+      #
+      # `dig` (not `default`) so that only an ABSENT key falls back to 5m: Helm
+      # coerces an unquoted `refresh_interval: 0` to the integer 0, which `default`
+      # counts as empty and would silently replace with 5m — turning "disable
+      # refreshing", the one thing this value exists to express, into its opposite.
+      refresh_interval: {{ dig "refresh_interval" "5m" . | quote }}
+      {{- with .traces }}
+      traces:
+        include:
+          {{- range .include }}
+          - {{ . | quote }}
+          {{- end }}
+        exclude:
+          {{- range .exclude }}
+          - {{ . | quote }}
+          {{- end }}
+        include_labels:
+          {{- range .include_labels }}
+          - {{ . | quote }}
+          {{- end }}
+        exclude_labels:
+          {{- range .exclude_labels }}
+          - {{ . | quote }}
+          {{- end }}
+      {{- end }}
+      {{- with .logs }}
+      logs:
+        exclude:
+          {{- range .exclude }}
+          - {{ . | quote }}
+          {{- end }}
+      {{- end }}
+    {{- end }}
+
+    log_filter:
+      min_level: {{ .Values.config.logFilter.minLevel | quote }}
+      denylist:
+        {{- range .Values.config.logFilter.denylist }}
+        - {{ . | quote }}
+        {{- end }}
+      sample_rate: {{ .Values.config.logFilter.sampleRate }}
+
+    logging:
+      level: {{ .Values.config.logging.level | quote }}
+      format: {{ .Values.config.logging.format | quote }}
+
+    telemetry:
+      enabled: {{ .Values.config.telemetry.enabled }}
+      endpoint: {{ .Values.config.telemetry.endpoint | quote }}
+      sample_rate: {{ .Values.config.telemetry.sample_rate }}
+      insecure: {{ .Values.config.telemetry.insecure }}
+      logs_enabled: {{ .Values.config.telemetry.logs_enabled }}
+
+    # Which collectors each consolidated process starts (#91). These replace
+    # "is this worker's Deployment present?" as the way a kind is switched off,
+    # now that several kinds share one process. Absent means enabled, so a
+    # hand-written config that predates these keys collects exactly what it did
+    # before.
+    collectors:
+      pod_status:
+        enabled: {{ .Values.statusCollector.kinds.podStatus.enabled }}
+      node_status:
+        enabled: {{ .Values.statusCollector.kinds.nodeStatus.enabled }}
+      deployment_status:
+        enabled: {{ .Values.statusCollector.kinds.deploymentStatus.enabled }}
+      hpa_status:
+        enabled: {{ .Values.statusCollector.kinds.hpaStatus.enabled }}
+      endpoint_health:
+        enabled: {{ .Values.statusCollector.kinds.endpointHealth.enabled }}
+      pvc_status:
+        enabled: {{ .Values.statusCollector.kinds.pvcStatus.enabled }}
+      configmap:
+        enabled: {{ .Values.statusCollector.kinds.configmap.enabled }}
+      job_status:
+        enabled: {{ .Values.statusCollector.kinds.jobStatus.enabled }}
+{{- $shared := include "accretion-collector.sharedDataCollectors" . | fromJsonArray }}
+{{- range $name := (list "log" "metric" "event" "trace") }}
+      {{ $name }}:
+        # A collector that is split into its own Deployment is disabled here, so
+        # the shared process drops it; the split Deployment runs with --only,
+        # which ignores these toggles entirely.
+        enabled: {{ and (index $.Values.dataCollector.kinds $name).enabled (has $name $shared) }}
+{{- end }}
+
+    collector:
+      worker_period: {{ .Values.config.collector.worker_period | quote }}
+      health_check_interval: {{ .Values.config.collector.health_check_interval | quote }}

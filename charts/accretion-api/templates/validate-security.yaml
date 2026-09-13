@@ -1,0 +1,10 @@
+{{- /*
+Executes the chart-level security guards defined in _validation.tpl. This file
+renders no Kubernetes objects; it exists so that `helm template`/`helm install`
+evaluate the guards and fail fast on insecure configuration.
+*/ -}}
+{{- include "accretion-api.validateDatabasePassword" . -}}
+{{- include "accretion-api.validateAPIKeyIdentities" . -}}
+{{- include "accretion-api.validateListeners" . -}}
+{{- include "accretion-api.validateTLS" . -}}
+{{- include "accretion-api.validateObservability" . -}}

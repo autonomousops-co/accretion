@@ -1,0 +1,55 @@
+name: release
+
+# Mirrors the pre-push hook server-side, where it cannot be skipped with
+# --no-verify or missed because someone never installed the hooks. A tag is
+# immutable once anyone has fetched it, so this is the last moment the mistake
+# is cheap.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  verify:
+    name: tag matches appVersion
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: charts must declare this release
+        run: scripts/check-chart-app-version.sh --tag "${GITHUB_REF_NAME}"
+      - name: the stamped version must equal the tag
+        run: |
+          got="$(bash scripts/version.sh)"
+          if [ "$got" != "${GITHUB_REF_NAME}" ]; then
+            echo "version.sh reported '$got' but the tag is '${GITHUB_REF_NAME}'" >&2
+            exit 1
+          fi
+          echo "ok: $got"
+
+  images:
+    name: publish images
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build and push
+        run: |
+          version="${GITHUB_REF_NAME}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker build --build-arg VERSION="$version" \
+            -t "$image:$version" -t "$image:latest" .
+          docker push "$image:$version"
+          docker push "$image:latest"

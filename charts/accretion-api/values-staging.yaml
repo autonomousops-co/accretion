@@ -1,0 +1,91 @@
+replicaCount: 2
+
+image:
+  repository: accretion-api
+  tag: latest
+  pullPolicy: Always
+
+# REPLACE THE HOSTNAME BELOW. `example.com` is RFC 2606 reserved and nobody can
+# register it, so this file renders and validates but serves nothing until you
+# put your own domain in. The name must match under both `hosts` and
+# `managedCertificate.domains`, or the Ingress routes to a certificate that does
+# not cover it.
+#
+# globalStaticIP is the NAME of a global static IP already reserved in your GCP
+# project, not an address.
+ingress:
+  enabled: true
+  className: "gce"
+  globalStaticIP: "accretion-api-staging-ip"
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.allow-http: "false"
+  hosts:
+    - host: staging.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  managedCertificate:
+    enabled: true
+    domains:
+      - staging.example.com
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 75
+
+config:
+  server:
+    host: "0.0.0.0"
+
+  database:
+    host: "accretion-db-postgresql.accretion-db.svc.cluster.local"
+    port: 5432
+    user: "postgres"
+    password: "postgres"
+    database: "accretion"
+    sslmode: "require"
+
+  logging:
+    level: "info"
+    format: "json"
+
+# SECURITY: staging identities are supplied at deploy time, never checked in —
+# same rule as prod. Left empty deliberately: the guard in
+# templates/_validation.tpl refuses to render an authenticated deployment with
+# no identities, so a staging install must name its callers explicitly. Supply
+# hashes only, so no plaintext enters the Helm release:
+#
+#   printf '%s' "$KEY" | shasum -a 256
+#   helm ... --set-json 'apiKeys=[{"name":"ci","hash":"<digest>","permissions":["read:memory"]}]'
+#
+# Give each caller only the permissions it needs: read:memory for read-only
+# clients, plus chat:query for the ones that call /api/chat.
+apiKeys: []
+
+# Reject any apiKeys entry carrying a plaintext `key`: staging identities are
+# hash-only so the plaintext never enters the Helm release.
+security:
+  forbidPlaintextAPIKeys: true
+
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: "postgres"
+    database: "accretion"
+  primary:
+    persistence:
+      size: 20Gi
+
+ollama:
+  enabled: false

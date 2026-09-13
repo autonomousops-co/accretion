@@ -1,0 +1,759 @@
+# Collector controller configuration
+#
+# The controller shards work across horizontally scaled collectors: it detects
+# dead workers, reassigns their pods and cleans up stale assignments, with Redis
+# holding that assignment state.
+#
+# SINCE #93 IT IS CONDITIONAL. The controller and Redis deploy only when some
+# collector is actually scaled -- more than one replica, or autoscaling enabled.
+# In a default install every collector runs 1/1 with no HPA, so there is nothing
+# to shard: the controller would be coordinating a fleet of one and its failover
+# would have no second worker to fail over to. On that path the dispatcher runs
+# inside the collector process and hands work to its own collectors over
+# channels (queue mode "inprocess"), and neither pod is deployed.
+#
+# So if you scale a collector and two new pods appear, that is why. There is no
+# separate flag to remember: scaling any collector past one replica, or turning
+# on its autoscaling, brings the controller, Redis and the Redis queue mode back
+# together. enabled=false here while a collector is scaled is refused at render
+# time by templates/_validation.tpl.
+collector:
+  enabled: true
+  image:
+    repository: accretion-api
+    tag: latest
+    # IfNotPresent, not Never. Never assumes the image is already loaded into
+    # every node -- true for a kind cluster with a locally built image, and an
+    # unconditional ImagePullBackOff against any registry-hosted tag. The local
+    # workflows that want the loaded image say so themselves: the Tiltfile sets
+    # IfNotPresent for all three workers, and Pulumi sets Always.
+    pullPolicy: IfNotPresent
+
+  replicaCount: 1
+
+  # Horizontal Pod Autoscaler
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  # Pod Disruption Budget
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+
+  resources:
+    # Right-sized against measured usage (1-3m CPU / 33-41Mi, most of which is
+    # Go runtime baseline). Override per worker if your cluster is larger.
+    requests:
+      memory: "64Mi"
+      cpu: "25m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+
+  service:
+    type: ClusterIP
+    port: 8080
+    targetPort: 8080
+
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+
+  rbac:
+    create: true
+
+  podAnnotations: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    capabilities:
+      drop:
+        - ALL
+  nodeSelector: {}
+  tolerations: []
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: collector
+            topologyKey: kubernetes.io/hostname
+
+# Data Collector configuration
+#
+# The log, metric, event and trace collectors (#92). Unlike the status kinds
+# these carry real volume -- metrics produced 1,297 records and logs 152 in a
+# representative sample -- so they are the ones an operator may genuinely want
+# to scale. That argues for keeping them SEPARABLE, not for keeping them
+# separate by default: a minimal install runs one replica of each with no HPA
+# and would otherwise pay four Go runtimes (~150Mi) for work one process
+# interleaves as goroutines.
+#
+# Back-pressure stays per collector: each runs in its own goroutine with its own
+# poll loop or queue consumer and its own circuit breakers, so a slow embedding
+# path on logs does not stall metric collection. The only shared resource is the
+# database pool (25 connections), which four serial writers do not contend for.
+#
+# To give one collector dedicated, scaled workers, set kinds.<name>.split=true.
+# The trace collector ships split already, for isolation rather than scale:
+# see the comment on kinds.trace.split.
+dataCollector:
+  enabled: true
+
+  kinds:
+    log:
+      enabled: true
+      # Split this collector into its own Deployment. The shared process then
+      # drops it and a dedicated Deployment runs `data-collector --only log`,
+      # scaled by the replicaCount / autoscaling below. Splitting one collector
+      # out leaves the others running exactly as they were.
+      split: false
+      replicaCount: 1
+      autoscaling:
+        enabled: false
+        minReplicas: 1
+        maxReplicas: 10
+        targetCPUUtilizationPercentage: 70
+        targetMemoryUtilizationPercentage: 80
+      podDisruptionBudget:
+        enabled: false
+        minAvailable: 1
+      # Used only when this collector is split out. The shared process uses
+      # dataCollector.resources below.
+      resources:
+        requests:
+          memory: "128Mi"
+          cpu: "50m"
+        limits:
+          memory: "512Mi"
+          cpu: "500m"
+    metric:
+      enabled: true
+      # Split this collector into its own Deployment. The shared process then
+      # drops it and a dedicated Deployment runs `data-collector --only metric`,
+      # scaled by the replicaCount / autoscaling below. Splitting one collector
+      # out leaves the others running exactly as they were.
+      split: false
+      replicaCount: 1
+      autoscaling:
+        enabled: false
+        minReplicas: 1
+        maxReplicas: 10
+        targetCPUUtilizationPercentage: 70
+        targetMemoryUtilizationPercentage: 80
+      podDisruptionBudget:
+        enabled: false
+        minAvailable: 1
+      # Used only when this collector is split out. The shared process uses
+      # dataCollector.resources below.
+      resources:
+        requests:
+          memory: "128Mi"
+          cpu: "50m"
+        limits:
+          memory: "512Mi"
+          cpu: "500m"
+    event:
+      enabled: true
+      # Split this collector into its own Deployment. The shared process then
+      # drops it and a dedicated Deployment runs `data-collector --only event`,
+      # scaled by the replicaCount / autoscaling below. Splitting one collector
+      # out leaves the others running exactly as they were.
+      split: false
+      replicaCount: 1
+      autoscaling:
+        enabled: false
+        minReplicas: 1
+        maxReplicas: 3
+        targetCPUUtilizationPercentage: 70
+        targetMemoryUtilizationPercentage: 80
+      podDisruptionBudget:
+        enabled: false
+        minAvailable: 1
+      # Used only when this collector is split out. The shared process uses
+      # dataCollector.resources below.
+      resources:
+        requests:
+          memory: "64Mi"
+          cpu: "25m"
+        limits:
+          memory: "512Mi"
+          cpu: "500m"
+    trace:
+      enabled: true
+      # Split by default, and for ISOLATION rather than scale (#100). The trace
+      # collector is the only accretion component with an unauthenticated
+      # inbound listener (OTLP on :4318). Inside the shared process it would
+      # share a ServiceAccount with the log collector, whose ClusterRole holds
+      # cluster-wide pods/log -- so an RCE in that listener would read every
+      # container log in the cluster, which is where credentials leak. On its
+      # own it is granted namespaces and pods get/list and nothing else. A
+      # dedicated pod is the price. Setting this false while log is also in the
+      # shared process is refused at render time (templates/_validation.tpl);
+      # `make rbac-check` asserts the rendered RBAC. Do not "simplify" this to
+      # false to save the pod.
+      split: true
+      replicaCount: 1
+      autoscaling:
+        enabled: false
+        minReplicas: 1
+        maxReplicas: 3
+        targetCPUUtilizationPercentage: 70
+        targetMemoryUtilizationPercentage: 80
+      podDisruptionBudget:
+        enabled: false
+        minAvailable: 1
+      # Used only when this collector is split out. The shared process uses
+      # dataCollector.resources below.
+      resources:
+        requests:
+          memory: "64Mi"
+          cpu: "25m"
+        limits:
+          memory: "512Mi"
+          cpu: "500m"
+
+  image:
+    repository: accretion-api
+    tag: latest
+    # IfNotPresent, not Never. Never assumes the image is already loaded into
+    # every node -- true for a kind cluster with a locally built image, and an
+    # unconditional ImagePullBackOff against any registry-hosted tag. The local
+    # workflows that want the loaded image say so themselves: the Tiltfile sets
+    # IfNotPresent for all three workers, and Pulumi sets Always.
+    pullPolicy: IfNotPresent
+
+  # Replicas of the SHARED process. Scaling this scales every collector still
+  # inside it together; to scale one on its own, split it out under kinds above.
+  replicaCount: 1
+
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+
+  # One Go runtime plus four collectors, replacing four separate runtimes. Sized
+  # on the log and metric workers this absorbs rather than on the small ones.
+  resources:
+    requests:
+      memory: "192Mi"
+      cpu: "100m"
+    limits:
+      memory: "768Mi"
+      cpu: "1000m"
+
+  service:
+    type: ClusterIP
+    port: 8080
+    targetPort: 8080
+
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+
+  rbac:
+    create: true
+
+  podAnnotations: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    capabilities:
+      drop:
+        - ALL
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+
+# Status Collector configuration
+#
+# One process runs every enabled object-state collector -- pod, node,
+# deployment, PVC, HPA, job, configmap and endpoint health -- as supervised
+# goroutines (#91). These were eight Deployments of the same image differing
+# only by subcommand; in a representative sample they produced 1-3 records each
+# against the metric worker's 1,297, so eight Go runtimes (~290Mi) were being
+# paid to collect roughly 2% of the data.
+#
+# The records written are unchanged: same resource_type values, same shape.
+# Since #96 each kind is driven by a client-go informer rather than a poll
+# loop; config.k8s.poll_interval is its resync period.
+statusCollector:
+  enabled: true
+
+  # Each resource kind stays independently switchable. Turning one off both
+  # stops that collector and drops its RBAC rule (see templates/rbac.yaml), so
+  # a kind you do not collect is a permission you do not grant.
+  kinds:
+    podStatus:
+      enabled: true
+    nodeStatus:
+      enabled: true
+    deploymentStatus:
+      enabled: true
+    hpaStatus:
+      enabled: true
+    endpointHealth:
+      enabled: true
+    pvcStatus:
+      enabled: true
+    # Tracks ConfigMap METADATA changes. Secrets are NOT collected and this
+    # chart grants no verb on them anywhere: cluster secrets are out of scope
+    # for monitoring. Kubernetes has no metadata-only read for a Secret, so
+    # recording their metadata would require cluster-wide read of every secret
+    # value; that trade is declined. Accretion's own components still
+    # authenticate normally, from Secrets the kubelet resolves via
+    # secretKeyRef, which needs no RBAC.
+    #
+    # What a ConfigMap record retains, in the informer store, the entry and the
+    # database row: name, namespace, resourceVersion, creation time, labels,
+    # and only annotations on a short allowlist of known tooling metadata
+    # (internal/k8s/configmap.go SafeAnnotations). Never .data or .binaryData,
+    # and never an annotation that could carry them -- kubectl's
+    # last-applied-configuration holds the applied ConfigMap in plaintext and
+    # is dropped.
+    configmap:
+      enabled: true
+    jobStatus:
+      enabled: true
+
+  image:
+    repository: accretion-api
+    tag: latest
+    # IfNotPresent, not Never. Never assumes the image is already loaded into
+    # every node -- true for a kind cluster with a locally built image, and an
+    # unconditional ImagePullBackOff against any registry-hosted tag. The local
+    # workflows that want the loaded image say so themselves: the Tiltfile sets
+    # IfNotPresent for all three workers, and Pulumi sets Always.
+    pullPolicy: IfNotPresent
+
+  replicaCount: 1
+
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+
+  # Memory scales with the OBJECTS THE INFORMERS CACHE, not with the number of
+  # collectors (#96). Every pod, deployment, replicaset, endpointslice, PVC,
+  # PV, node, HPA, job and cronjob in the watched namespaces, plus the
+  # metadata of every configmap and secret, is resident for the life of the
+  # process -- roughly 5-40 KiB each with managedFields stripped (measured:
+  # deployments ~37 KiB, nodes ~29 KiB, pods ~26 KiB). Calibration point: a
+  # cluster of ~3,000 objects (500 pods, 200 deployments, 600 replicasets,
+  # 300 configmaps, 1,000 endpointslices, 20 nodes, 200 jobs) measured
+  # ~47 MiB resident cache, ~85 MiB live heap, ~160-180 MiB RSS at GOGC=100 --
+  # inside the 256Mi request below. A static namespace list caches only those
+  # namespaces; a label or "*" scope caches the whole cluster, and a
+  # 3,000-pod cluster approaches the limit. Raise both with the object count.
+  # goMemLimit keeps the Go heap under the limit under pressure instead of
+  # letting the collector overshoot into an OOMKill.
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "50m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  # Soft heap cap for the Go runtime, passed as the GOMEMLIMIT env var. Keep
+  # it below resources.limits.memory with headroom for non-heap memory (the
+  # runtime, goroutine stacks, TLS buffers); `make sizing-check` asserts it is
+  # set and below the limit. Go's unit spelling: MiB, GiB. With GOGC=100 the
+  # limit only engages once the live heap passes ~225 MiB (~8,000 cached
+  # objects); above that the pod runs over its 256Mi request by design
+  # (Burstable), and that steady state is expected for large scopes.
+  goMemLimit: "450MiB"
+
+  service:
+    type: ClusterIP
+    port: 8080
+    targetPort: 8080
+
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+
+  rbac:
+    create: true
+
+  podAnnotations: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    capabilities:
+      drop:
+        - ALL
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+
+# Shared configuration
+config:
+  database:
+    # PostgreSQL runs in its own `accretion-db` namespace; reach it by FQDN.
+    host: "accretion-db-postgresql.accretion-db.svc.cluster.local"
+    port: 5432
+    user: "postgres"
+    # Source for the chart-owned postgresql-secret Secret (templates/secrets.yaml),
+    # read at runtime via the ACCRETION_DATABASE_PASSWORD env var (secretKeyRef) --
+    # never written into the ConfigMap. DEV ONLY: ignored entirely once
+    # existingSecret below is set.
+    password: "postgres"
+    # RECOMMENDED FOR PRODUCTION (see README.md, #113). When set, the chart does
+    # NOT create its own postgresql-secret: every container/initContainer that
+    # reads the database password (wait-for-postgres, and the collector,
+    # data-collector and status-collector processes) references THIS Secret by
+    # name instead, via secretKeyRef, and the chart never receives, renders, or
+    # interpolates the value anywhere. That matters because even
+    # `--set-string config.database.password=<value>` puts the value in shell
+    # history and in the Helm release Secret, where `helm get values` returns it
+    # in cleartext (see charts/DKJR.md for the same shape on a different key).
+    # Create the Secret out of band -- a plain `kubectl create secret generic`,
+    # External Secrets Operator, Vault, or SOPS -- and point this at its name.
+    # Leave "" (the default) to keep the chart managing its own Secret from
+    # config.database.password above; existing installs keep working unchanged.
+    existingSecret: ""
+    # Key inside existingSecret holding the password. Only one key is needed on
+    # the Postgres side (unlike Redis below); change this only if your Secret
+    # names it something other than "password". Render time refuses an
+    # existingSecret with this blanked out, so a misconfigured chart fails at
+    # `helm template`/`helm install` rather than independently at every
+    # consumer's rollout.
+    existingSecretKey: "password"
+    database: "accretion"
+    sslmode: "disable"
+
+  # The Redis address is derived from the release name in the templates
+  # (<release>-redis-master); there is no host key because nothing reads one.
+  # The password lives under redis.auth.password / redis.auth.existingSecret
+  # below (#113). This key duplicated that value rather than the other way
+  # around: it was the one templates/redis.yaml, configmap.yaml and
+  # data-collector-deployment.yaml actually read, until #111/#112 moved every
+  # one of those readers onto redis.auth.password and its Secret. Deleted here
+  # once its last reader was gone, not because it was always unread.
+  redis:
+    port: 6379
+    database: 0
+
+  llm:
+    provider: "ollama"
+    openai:
+      base_url: "https://api.openai.com/v1"
+      model: "gpt-4"
+    ollama:
+      base_url: "http://host.docker.internal:11434"
+      model: "nomic-embed-text:latest"
+    embedding_model: "nomic-embed-text:latest"
+
+  # Unified namespace scoping (#146). This is the single include/exclude model
+  # consumed by every data source. `include`/`exclude` apply to the polled
+  # sources and the pod-discovery controller; `traces` overrides `include` for
+  # the push-based trace worker; `logs` adds excludes for the log worker only.
+  # Exclude always wins.
+  #
+  # Loop prevention for traces is `selfNamespace` below: TraceNamespaceSelector
+  # adds it to Exclude and Exclude beats Include, so accretion cannot ingest its
+  # own traces however wide namespaces.traces.include is set. The upstream
+  # otel-collector filter drops them earlier, but this is the structural one.
+  #
+  # Self-ingestion (#145): accretion's own namespace (where the collectors and Postgres
+  # run) is NOT monitored by default — it is not in the polled set below. The
+  # loop-safe machinery is still wired: `selfNamespace` excludes it from the LOG
+  # worker specifically, so IF an operator opts in (by adding the release namespace
+  # to the watched set) metrics/status/events are ingested while its logs are not —
+  # the log worker would otherwise re-ingest its own log lines (emits -> ingests ->
+  # emits more).
+  # WARNING: if you opt in, do NOT also enable Postgres `log_statement`; the log
+  # self-exclusion is what keeps that safe.
+  #
+  # Back-compat: leaving `include` empty falls back to the legacy k8s.namespaces
+  # list below, and leaving `traces.include` empty falls back to the legacy
+  # traceWorker.namespaces list — so existing values keep working unchanged.
+  #
+  # Namespaces can be selected by name (include/exclude), by label selector
+  # (include_labels/exclude_labels), or with the "*" sentinel in `include` for
+  # ALL namespaces. include_labels/exclude_labels entries are standard Kubernetes
+  # label-selector strings (e.g. "env=prod,tier!=infra"); a namespace matches if
+  # it satisfies ANY entry. Exclude (name or label) always wins. Label/"*"
+  # resolution is re-run every refresh_interval (below), so a namespace created,
+  # deleted, or relabeled after a worker starts is picked up within one interval,
+  # without a restart (#152). Using labels or "*" requires the "namespaces:
+  # [get, list]" RBAC rule (granted by this chart) — LIST only, no watch.
+  namespaces:
+    # accretion's own namespace, excluded from the LOG selector only (never from
+    # metrics/status). The chart ALWAYS self-excludes the release namespace: this
+    # value is rendered as `{{ .selfNamespace | default $.Release.Namespace }}`,
+    # and because Helm's `default` treats "" as empty, leaving it "" (or setting
+    # it to any namespace) still resolves to a non-empty self_namespace. There is
+    # no way to opt OUT of log self-exclusion through this value — opting out is a
+    # config-layer capability only (an empty self_namespace in the rendered
+    # config, which this chart never produces). Set it to a specific namespace to
+    # self-exclude a different one instead of the release namespace.
+    selfNamespace: ""
+    include: []           # empty => use k8s.namespaces (below) for polled sources
+                          # a "*" entry means ALL namespaces (then exclude subtracts)
+    exclude: []
+    include_labels: []    # label selectors; namespace matches if it satisfies ANY
+    exclude_labels: []    # label selectors; matching namespaces are excluded
+    # How often label/"*" scoping is re-resolved against the API (#152). Costs one
+    # LIST per configured label selector per worker per interval; name-only
+    # configs resolve nothing and never list, whatever this is set to. A failed
+    # refresh keeps the last good set (it never empties or widens scope). Set to
+    # "0" to disable refreshing and pin the startup snapshot. Any other value must
+    # be >= 10s: a smaller one is rejected at startup, since "5ms" is far more
+    # likely a slip for "5m" than an intent to LIST ~200x/sec from every worker.
+    refresh_interval: "5m"
+    traces:
+      # Ingest traces from every namespace EXCEPT accretion's own, which
+      # TraceNamespaceSelector adds to Exclude from selfNamespace above (Exclude
+      # beats Include, so it holds even against "*"). That self-exclusion is the
+      # anti-feedback-loop control of record: RAG ingestion emits spans via the
+      # embedding path, so ingesting its own traces would feed back into itself.
+      #
+      # Why "*" and not a name list: the only thing a name list here could say is
+      # "the namespaces we happen to poll", and it would have to be kept in step
+      # with k8s.namespaces below by hand — add a namespace to one, forget the
+      # other, and that namespace's traces are silently dropped. Traces are
+      # push-based; they arrive from whoever is instrumented, which is not
+      # knowable from a polling list.
+      #
+      # This is not the place scope gets enforced. The upstream otel-collector
+      # filter is: it stamps the namespace from the sender's pod identity
+      # (k8sattributes) and drops accretion's own plus anything unattributable,
+      # BEFORE spans reach this worker. To bound ingestion to specific namespaces
+      # anyway — to cap embedding spend, say — put them in `include` here; the
+      # collector-side filter still runs first.
+      include: ["*"]
+      exclude: []
+      include_labels: []  # label selectors for trace-scoped includes (OR-matched)
+      exclude_labels: []  # label selectors for trace-scoped excludes
+    logs:
+      exclude: []         # extra namespaces excluded from log ingestion only
+
+  k8s:
+    # Legacy polled-source namespace list. Still honored when namespaces.include
+    # above is empty. Prefer namespaces.include for new configuration.
+    #
+    # NOTE (#145): accretion's own namespace (e.g. accretion-core) is intentionally NOT added
+    # to this polled set — accretion does not monitor itself by default. To opt in, add
+    # the release namespace here (or to namespaces.include); its logs stay excluded
+    # via namespaces.selfNamespace so the amplification loop stays closed.
+    namespaces:
+      - "default"
+      - "development"
+      # The database's own namespace — monitored (metrics/status/events/logs).
+      # Safe because accretion's collectors do not run here, so ingesting its logs
+      # can't feed the amplification loop (keep Postgres log_statement=none).
+      - "accretion-db"
+      # The status collector opens about ten informers per namespace listed
+      # here, and warns at startup past about twenty. A label or "*" scope
+      # watches the cluster once instead, at the cost of caching every namespace.
+    # Poll period of the event collector, and the informer RESYNC period of the
+    # status collectors (#96): they no longer list every namespace each
+    # interval but hold one watch per resource, and at least once per interval
+    # every object is re-evaluated from the cache. A change is written when it
+    # happens, not at the next tick.
+    poll_interval: "30s"
+
+  # Legacy pre-#146 key, superseded by namespaces.traces above and read ONLY when
+  # that include list is empty (internal/config/namespace.go,
+  # TraceNamespaceSelector). Left empty rather than deleted so an existing values
+  # override of it keeps working; the policy lives in one place now.
+  #
+  # Note the fallback is not a hole: an empty include and an empty legacy list
+  # resolve to the same policy as "*", and self_namespace is excluded either way.
+  traceWorker:
+    namespaces: []
+
+  # Ingestion-side filtering for the log worker, applied BEFORE embedding to
+  # drop high-frequency repetitive lines (health checks, probes, access logs)
+  # that dedup cannot bound. Defaults below are a no-op so every non-empty line
+  # is ingested exactly as before — filtering is strictly opt-in.
+  logFilter:
+    # Minimum level to ingest: one of "trace", "debug", "info", "notice",
+    # "warn", "error", "critical", "alert", "emerg" (synonyms "warning", "err",
+    # "crit", "fatal", "panic", "emergency" are accepted). "" disables level
+    # filtering. Lines whose level cannot be detected are kept (fail-open); note
+    # "notice"/"trace" are valid thresholds but are not keyword-detected in
+    # message text, so such lines are kept rather than risk dropping prose.
+    minLevel: ""
+    # Regular expressions matched against the raw message; a matching line is
+    # dropped. Example: ["/health", "/readyz", "/livez"].
+    denylist: []
+    # Keep only this fraction (0,1) of otherwise-passing lines; <=0 or >=1
+    # disables sampling.
+    sampleRate: 0.0
+
+  logging:
+    level: "debug"
+    format: "json"
+
+  telemetry:
+    enabled: true
+    endpoint: "otel-collector.obs.svc.cluster.local:4317"
+    sample_rate: 1.0
+    insecure: true
+    logs_enabled: true
+
+  collector:
+    worker_period: "30s"
+    health_check_interval: "60s"
+
+# Redis configuration
+#
+# The chart's own standalone Redis (templates/redis.yaml) deploys only under
+# scale-out, alongside the controller whose pod-assignment state it holds.
+#
+# ITS STATE IS EPHEMERAL BY DESIGN. Worker health keys expire after 60s and the
+# controller re-derives every assignment from the pod informer on a 60s loop,
+# so the store is reconciled state, not a source of truth. A Redis restart
+# costs one re-assignment pass -- collectors briefly re-receive their pods --
+# and loses no data; a volume would persist stale assignments across exactly
+# the restart the controller rebuilds from. That is why there is no
+# persistence block here: the redis.master.persistence and
+# redis.master.resources keys that used to promise 20Gi and a CPU limit were
+# read by no template and rendered nothing (#105, answering #97).
+#
+# `enabled: true` selects the Bitnami subchart INSTEAD of the standalone
+# template, and this chart declares no such dependency, so it means "deploy no
+# Redis at all"; templates/_validation.tpl refuses it under scale-out.
+redis:
+  enabled: false
+  auth:
+    enabled: true
+    # Single source of truth for the Redis password: templates/secrets.yaml
+    # derives BOTH the redis-secret's `password` key (clients) and its
+    # `redis.conf` key (the server's requirepass directive, mounted as a file --
+    # see the existingSecret comment below for why two shapes are needed at
+    # all) from this one value, and refuses to render if it is empty or
+    # contains anything outside printable ASCII (an empty password is an
+    # unauthenticated Redis; outside that range, Go's %q and redis.conf's own
+    # parser disagree on some escapes -- see templates/secrets.yaml). Ignored
+    # entirely once existingSecret below is set.
+    #
+    # EMPTY, and it fails closed. This shipped a working credential as a chart
+    # default -- deliberately not repeated here, since quoting it would republish
+    # the thing removing it was meant to retire -- so every install that scaled
+    # out and did not override it ran Redis on a password printed in a public
+    # repository. Same reasoning as #118: a published chart must not
+    # ship a working credential, and a default that refuses to render with a
+    # named message is better than one that silently works with a password
+    # anyone can read. Leaving it empty is not "no password": the guard in
+    # templates/secrets.yaml refuses an empty value precisely because
+    # `requirepass ""` reads as no password required at all.
+    #
+    # Only scale-out deploys Redis, so a default install never reaches this.
+    # Set it, or set redis.auth.existingSecret, which is what production should
+    # do -- the chart then never receives the value at all.
+    password: ""
+    # RECOMMENDED FOR PRODUCTION (see README.md, #113). When set, the chart does
+    # NOT create its own redis-secret: the chart never receives, renders, or
+    # interpolates the password anywhere, the same tradeoff as
+    # config.database.existingSecret above. Create the Secret out of band and
+    # point this at its name.
+    #
+    # UNLIKE the database secret, this needs the value in TWO SHAPES from the
+    # SAME Secret, because redis-server has no env-var form of requirepass:
+    #   - existingSecretPasswordKey (default "password"): the raw password,
+    #     read by every client via secretKeyRef (the controller and
+    #     data-collector processes).
+    #   - existingSecretConfKey (default "redis.conf"): a config-file directive
+    #     (`requirepass "<password>"`), mounted as a file and named on the
+    #     redis-server command line -- see templates/redis.yaml.
+    # A Secret missing either key is not caught here -- it fails at rollout
+    # instead, on a client's secretKeyRef or the Redis pod's volume mount, with
+    # an error pointing at a key or a mount rather than at this value. Render
+    # time does refuse an existingSecret with either key NAME blanked out, so a
+    # chart that forgot to wire one up is caught at `helm template`/`helm
+    # install`, though it still cannot confirm your actual Secret carries both
+    # keys -- only that you told it where to look.
+    #
+    # WHAT YOU TAKE OVER: the empty-password half of the guard above transfers
+    # exactly -- an existingSecretConfKey entry that is empty, or missing
+    # "requirepass" altogether, gives Redis no password at all, silently, and
+    # nothing here can catch it once the chart stops seeing the value. The
+    # %q-versus-redis.conf escape mismatch the SAME guard also catches does
+    # NOT transfer: that mismatch is an artifact of this chart's own encoding
+    # step (templates/secrets.yaml), and with existingSecret set the chart
+    # renders no redis.conf and %q never runs -- whatever wrote your Secret
+    # owns its own encoding correctness instead.
+    #
+    # A genuinely NEW burden, one the chart-owned path never has: keeping the
+    # two keys MUTUALLY CONSISTENT. The chart guarantees that by deriving both
+    # from one value; with existingSecret set, you own that coupling, and a
+    # password key that has drifted from the conf key's requirepass directive
+    # reproduces exactly the client-server password divergence this sprint
+    # spent three review cycles closing (see templates/secrets.yaml and `make
+    # redis-check`'s single-source-of-truth assertion, neither of which can
+    # see into an external Secret's content).
+    #
+    # Leave "" (the default) to keep the chart managing and validating its own
+    # Secret from redis.auth.password above; existing installs keep working
+    # unchanged. Note the chart also cannot detect a rotation of an
+    # existingSecret's content -- roll the Redis and client pods yourself
+    # (e.g. `kubectl rollout restart`) after updating it.
+    existingSecret: ""
+    existingSecretPasswordKey: "password"
+    existingSecretConfKey: "redis.conf"
+  # Sized at 75% of the 256Mi limit in templates/redis.yaml; raise both
+  # together. Above it Redis refuses every write until memory is freed, so
+  # alert on used_memory approaching this. `make redis-check` asserts it is
+  # set, below the limit, and uses the mb suffix the check compares. What the
+  # cap does to the queue, and why the policy below is the only fit, is in
+  # templates/redis.yaml.
+  maxmemory: "192mb"
+  maxmemoryPolicy: "noeviction"
+
+commonAnnotations: {}

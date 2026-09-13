@@ -1,0 +1,277 @@
+{{- if .Values.partitionMaintenance.enabled }}
+{{- if .Values.partitionMaintenance.archive.enabled }}
+{{- if not (or .Values.partitionMaintenance.archive.existingClaim .Values.partitionMaintenance.archive.hostPath) }}
+{{- fail "partitionMaintenance.archive.enabled=true requires either partitionMaintenance.archive.existingClaim (a PVC) or partitionMaintenance.archive.hostPath (kind/dev); refusing to render an ephemeral emptyDir that would silently discard archived weeks." }}
+{{- end }}
+{{- end }}
+# Partition maintenance for unified_entries. Pre-creates upcoming weekly
+# partitions (so writes never fall through to the DEFAULT partition) and, when a
+# retention window is configured, detaches + (optionally archives +) drops
+# partitions older than it. This is the hand-rolled replacement for pg_partman
+# (not in the DB image).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "accretion-db.fullname" . }}-partition-maintenance
+  labels:
+    {{- include "accretion-db.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.partitionMaintenance.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            {{- include "accretion-db.selectorLabels" . | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: partition-maintenance
+              image: {{ .Values.schemaJob.image }}
+              command:
+                - sh
+                - -c
+                - |
+                  set -e
+                  set -o pipefail
+                  # Reject non-integer config before it reaches SQL string interpolation.
+                  case "$AHEAD_WEEKS" in ''|*[!0-9]*)
+                    echo "AHEAD_WEEKS must be a non-negative integer (got '$AHEAD_WEEKS')"; exit 1;; esac
+                  # Require a forward buffer: with 0, next week's writes land in the
+                  # DEFAULT partition before its partition exists, which the ensure
+                  # function then has to detach/move to repair.
+                  if [ "$AHEAD_WEEKS" -lt 1 ]; then
+                    echo "AHEAD_WEEKS must be >= 1 (got '$AHEAD_WEEKS')"; exit 1
+                  fi
+                  case "$RETENTION_WEEKS" in ''|*[!0-9]*)
+                    echo "RETENTION_WEEKS must be a non-negative integer (got '$RETENTION_WEEKS')"; exit 1;; esac
+
+                  # Archive config validation (#143). Default OFF => today's DETACH+DROP.
+                  if [ "$ARCHIVE_ENABLED" = "true" ]; then
+                    ARCHIVED=true
+                    case "$ARCHIVE_FORMAT" in
+                      pgdump) ;;
+                      csv) echo "ARCHIVE_FORMAT=csv is not implemented yet; use 'pgdump'"; exit 1;;
+                      *) echo "ARCHIVE_FORMAT must be 'pgdump' (got '$ARCHIVE_FORMAT')"; exit 1;;
+                    esac
+                    if [ -z "$ARCHIVE_PATH" ]; then
+                      echo "ARCHIVE_PATH must be set when archiving is enabled"; exit 1
+                    fi
+                    # Prove the archive volume is mounted and writable BEFORE we detach
+                    # anything: detaching first and only then discovering a missing or
+                    # read-only volume would strand a partition outside the hierarchy.
+                    if [ ! -d "$ARCHIVE_PATH" ]; then
+                      echo "archive path '$ARCHIVE_PATH' does not exist or is not a directory (volume not mounted?)"; exit 1
+                    fi
+                    if ! touch "$ARCHIVE_PATH/.write_test.$$" 2>/dev/null; then
+                      echo "archive path '$ARCHIVE_PATH' is not writable"; exit 1
+                    fi
+                    rm -f "$ARCHIVE_PATH/.write_test.$$"
+                  else
+                    ARCHIVED=false
+                  fi
+
+                  # Skip cleanly if the table hasn't been migrated to partitioned yet.
+                  IS_PART=$(psql -d "$PGDATABASE" -tAc "SELECT 1 FROM pg_partitioned_table pt JOIN pg_class c ON c.oid = pt.partrelid WHERE c.relname = 'unified_entries'")
+                  if [ "$IS_PART" != "1" ]; then
+                    echo "unified_entries is not partitioned yet; nothing to do."
+                    exit 0
+                  fi
+
+                  echo "Pre-creating weekly partitions (this week..+${AHEAD_WEEKS})..."
+                  psql -d "$PGDATABASE" -v ON_ERROR_STOP=1 -c \
+                    "SELECT ensure_unified_entries_partition((CURRENT_DATE + (n || ' week')::interval)::date) FROM generate_series(0, ${AHEAD_WEEKS}) AS g(n);"
+
+                  DROPPED_PARTITIONS=0
+                  DROPPED_ROWS=0
+                  ARCHIVED_BYTES=0
+                  FAILED=0
+
+                  # The core invariant (#143): a detached weekly table is archived and
+                  # VERIFIED before it is dropped. On any export/verify failure the
+                  # table is left detached (never dropped) and FAILED is set, so the
+                  # data survives and the next run's recovery pass retries it. Assumes
+                  # $part is already a standalone (detached) table. Counters live in the
+                  # main shell — do NOT call this from a subshell/pipe.
+                  finish_partition() {
+                    part="$1"
+                    # Observability only: never gates the drop. Guarded because the
+                    # outer `... || echo` disables set -e in this body, so a psql
+                    # failure here would otherwise yield an empty ROWS and under-report
+                    # rows_dropped. Default to a sentinel rather than "".
+                    if ! ROWS=$(psql -d "$PGDATABASE" -v ON_ERROR_STOP=1 -Atc "SELECT count(*) FROM \"$part\";"); then
+                      echo "  WARN: could not count rows for $part; treating count as 0 for the summary (does not affect the drop)"
+                      ROWS=0
+                    fi
+                    if [ "$ARCHIVE_ENABLED" = "true" ]; then
+                      f="$ARCHIVE_PATH/$part.dump"
+                      # Deterministic filename => idempotent. A complete, valid archive
+                      # already present (e.g. crashed after mv, before DROP) => just drop.
+                      if [ -s "$f" ] && pg_restore -l "$f" >/dev/null 2>&1; then
+                        echo "  archive already present and valid: $f"
+                      else
+                        tmp="$f.tmp"
+                        rm -f "$tmp"
+                        # write-temp-then-rename so a partial dump (disk full, killed
+                        # mid-write) never appears as a complete .dump file.
+                        if ! pg_dump -Fc -t "$part" "$PGDATABASE" > "$tmp"; then
+                          echo "  ERROR: pg_dump failed for $part (${ROWS} rows); NOT dropping"
+                          rm -f "$tmp"; FAILED=1; return 1
+                        fi
+                        # Verify: non-empty AND a readable custom-format archive whose
+                        # TOC pg_restore can list (catches truncated/corrupt output).
+                        # NOTE: pg_restore -l verifies only the TOC (defense-in-depth);
+                        # the real integrity guard is pg_dump's non-zero exit + the
+                        # atomic temp-then-rename below. Do not weaken the pg_dump exit
+                        # check on the assumption that -l alone proves the dump good.
+                        if [ ! -s "$tmp" ] || ! pg_restore -l "$tmp" >/dev/null 2>&1; then
+                          echo "  ERROR: archive for $part is empty or unreadable; NOT dropping"
+                          rm -f "$tmp"; FAILED=1; return 1
+                        fi
+                        # Guarded like the steps above: the outer `... || echo` disables
+                        # set -e in this body, so an unguarded mv failure (volume flipped
+                        # read-only, ENOSPC on the dir inode, $f is a directory) would
+                        # fall through to DROP with the dump stranded at $f.tmp. Never
+                        # drop unless the archive is at its canonical $f name.
+                        if ! mv "$tmp" "$f"; then
+                          echo "  ERROR: could not move archive into place for $part; NOT dropping"
+                          rm -f "$tmp"; FAILED=1; return 1
+                        fi
+                      fi
+                      BYTES=$(wc -c < "$f" | tr -d ' ')
+                      ARCHIVED_BYTES=$((ARCHIVED_BYTES + BYTES))
+                      echo "  archived $part -> $f (${BYTES} bytes)"
+                    fi
+                    psql -d "$PGDATABASE" -v ON_ERROR_STOP=1 -c "DROP TABLE IF EXISTS \"$part\";"
+                    echo "  dropped $part (${ROWS} rows)"
+                    DROPPED_PARTITIONS=$((DROPPED_PARTITIONS + 1))
+                    DROPPED_ROWS=$((DROPPED_ROWS + ROWS))
+                    return 0
+                  }
+
+                  if [ "${RETENTION_WEEKS}" -gt 0 ]; then
+                    echo "Applying retention: dropping weekly partitions older than ${RETENTION_WEEKS} week(s)..."
+                    # Detach then drop each expired weekly partition. NOTE: plain
+                    # DETACH (not CONCURRENTLY) — Postgres forbids DETACH CONCURRENTLY
+                    # while a DEFAULT partition exists, which is always the case here.
+                    # Detach takes a brief ACCESS EXCLUSIVE lock on the parent; run
+                    # during the configured quiet window. The DEFAULT partition and any
+                    # partition within the window are kept. Partitions are named by their
+                    # Monday (YYYYMMDD); a week is expired once that Monday is more than
+                    # RETENTION_WEEKS weeks before the current week's Monday.
+
+                    # Recovery pass (#143): finish any weekly tables a previous run left
+                    # DETACHed but not yet DROPped (it died in between). A leftover is a
+                    # standalone table matching the weekly name pattern that is NOT
+                    # attached to any parent (no pg_inherits row). Deterministic archive
+                    # filenames make re-processing idempotent. Do this before the normal
+                    # expirations so a half-finished run is repaired first.
+                    #
+                    # Gated on ARCHIVE_ENABLED: only the archive-then-drop path (which
+                    # DETACHes as its own first step) can produce these leftovers, so a
+                    # standalone unified_entries_YYYYMMDD found with archiving OFF is not
+                    # ours — it may be an operator-restored week with no backup. Running
+                    # the pass here would DROP it unarchived. With archiving disabled we
+                    # therefore keep exactly the pre-PR behavior: normal expirations only.
+                    if [ "$ARCHIVE_ENABLED" = "true" ]; then
+                      LEFTOVER=$(psql -d "$PGDATABASE" -v ON_ERROR_STOP=1 -Atc "
+                        SELECT c.relname
+                        FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        WHERE c.relkind = 'r'
+                          AND n.nspname = current_schema()
+                          AND c.relname ~ '^unified_entries_[0-9]{8}\$'
+                          AND NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid)
+                      ")
+                      for part in $LEFTOVER; do
+                        [ -z "$part" ] && continue
+                        echo "  recovering detached leftover $part"
+                        finish_partition "$part" || echo "  KEPT $part detached: archive did not verify; will retry next run"
+                      done
+                    fi
+
+                    # Normal pass: expired children still attached to the parent.
+                    #
+                    # Collect the list into a variable instead of piping it into `while`:
+                    # a piped loop runs in a subshell, so the counters (incremented inside
+                    # finish_partition) would be lost when it exits.
+                    EXPIRED=$(psql -d "$PGDATABASE" -v ON_ERROR_STOP=1 -Atc "
+                      SELECT c.relname
+                      FROM pg_inherits i
+                      JOIN pg_class c ON c.oid = i.inhrelid
+                      JOIN pg_class p ON p.oid = i.inhparent
+                      WHERE p.relname = 'unified_entries'
+                        AND c.relname ~ '^unified_entries_[0-9]{8}\$'
+                        AND to_date(right(c.relname, 8), 'YYYYMMDD') < (date_trunc('week', CURRENT_DATE) - (${RETENTION_WEEKS} || ' week')::interval)::date
+                    ")
+                    for part in $EXPIRED; do
+                      [ -z "$part" ] && continue
+                      # Detach one, then archive+verify+drop it: if the archive fails we
+                      # stop before dropping and leave the rest attached (still queryable).
+                      psql -d "$PGDATABASE" -v ON_ERROR_STOP=1 -c "ALTER TABLE unified_entries DETACH PARTITION \"$part\";"
+                      finish_partition "$part" || echo "  KEPT $part detached: archive did not verify; will retry next run"
+                    done
+                  else
+                    echo "Retention disabled (retentionWeeks=0); only pre-creating partitions."
+                  fi
+
+                  # archive_path/archive_bytes are only meaningful when archiving ran.
+                  REPORT_PATH=""
+                  [ "$ARCHIVE_ENABLED" = "true" ] && REPORT_PATH="$ARCHIVE_PATH"
+
+                  # Structured summary line for observability (issues #128, #143): one
+                  # JSON object per run, emitted even on no-op runs so that "retention
+                  # did nothing" is visible rather than silent. Greppable from the Job
+                  # logs and parseable by a log pipeline. `archived` reflects whether the
+                  # archive-then-drop path was active this run.
+                  echo "{\"event\":\"partition_retention\",\"retention_weeks\":${RETENTION_WEEKS},\"partitions_dropped\":${DROPPED_PARTITIONS},\"rows_dropped\":${DROPPED_ROWS},\"archived\":${ARCHIVED},\"archive_path\":\"${REPORT_PATH}\",\"archive_bytes\":${ARCHIVED_BYTES}}"
+
+                  # If any partition could not be archived it was intentionally NOT
+                  # dropped; fail the run so the operator sees it (backoffLimit retries).
+                  if [ "$FAILED" -ne 0 ]; then
+                    echo "ERROR: one or more weekly partitions could not be archived and were left detached (not dropped); see errors above."
+                    exit 1
+                  fi
+              env:
+                - name: PGHOST
+                  value: {{ .Values.config.database.host | quote }}
+                - name: PGPORT
+                  value: {{ .Values.config.database.port | quote }}
+                - name: PGUSER
+                  value: {{ .Values.config.database.user | quote }}
+                - name: PGPASSWORD
+                  value: {{ .Values.config.database.password | quote }}
+                - name: PGDATABASE
+                  value: {{ .Values.config.database.database | quote }}
+                - name: AHEAD_WEEKS
+                  value: {{ .Values.partitionMaintenance.aheadWeeks | quote }}
+                - name: RETENTION_WEEKS
+                  value: {{ .Values.partitionMaintenance.retentionWeeks | quote }}
+                - name: ARCHIVE_ENABLED
+                  value: {{ .Values.partitionMaintenance.archive.enabled | quote }}
+                - name: ARCHIVE_PATH
+                  value: {{ .Values.partitionMaintenance.archive.path | quote }}
+                - name: ARCHIVE_FORMAT
+                  value: {{ .Values.partitionMaintenance.archive.format | quote }}
+              {{- if .Values.partitionMaintenance.archive.enabled }}
+              volumeMounts:
+                - name: archive
+                  mountPath: {{ .Values.partitionMaintenance.archive.path | quote }}
+              {{- end }}
+          {{- if .Values.partitionMaintenance.archive.enabled }}
+          volumes:
+            - name: archive
+              {{- if .Values.partitionMaintenance.archive.existingClaim }}
+              persistentVolumeClaim:
+                claimName: {{ .Values.partitionMaintenance.archive.existingClaim | quote }}
+              {{- else }}
+              hostPath:
+                path: {{ .Values.partitionMaintenance.archive.hostPath | quote }}
+                type: DirectoryOrCreate
+              {{- end }}
+          {{- end }}
+{{- end }}

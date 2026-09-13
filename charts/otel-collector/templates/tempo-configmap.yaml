@@ -1,0 +1,69 @@
+{{- if .Values.tempo.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "otel-collector.fullname" . }}-tempo
+  labels:
+    {{- include "otel-collector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tempo
+data:
+  tempo.yaml: |
+    server:
+      http_listen_port: 3200
+
+    distributor:
+      receivers:
+        otlp:
+          protocols:
+            grpc:
+              endpoint: "0.0.0.0:4317"
+            http:
+              endpoint: "0.0.0.0:4318"
+
+    ingester:
+      trace_idle_period: 10s
+      max_block_bytes: 1_000_000
+      max_block_duration: 5m
+
+    compactor:
+      compaction:
+        compaction_window: 1h
+        max_block_bytes: 100_000_000
+        block_retention: 1h
+        compacted_block_retention: 10m
+
+    metrics_generator:
+      registry:
+        external_labels:
+          source: tempo
+          cluster: local
+      storage:
+        path: /var/tempo/generator/wal
+        remote_write:
+          - url: http://{{ include "otel-collector.fullname" . }}-prometheus:9090/api/v1/write
+      traces_storage:
+        path: /var/tempo/generator/traces
+      processor:
+        service_graphs:
+          dimensions:
+            - service.name
+        span_metrics:
+          dimensions:
+            - service.name
+        local_blocks:
+          flush_to_storage: false
+
+    storage:
+      trace:
+        backend: local
+        wal:
+          path: /var/tempo/wal
+        local:
+          path: /var/tempo/blocks
+
+    overrides:
+      defaults:
+        metrics_generator:
+          processors: [service-graphs, span-metrics, local-blocks]
+          collection_interval: 15s
+{{- end }}

@@ -1,0 +1,70 @@
+{{- if .Values.grafana.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "otel-collector.fullname" . }}-grafana-datasources
+  labels:
+    {{- include "otel-collector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://{{ include "otel-collector.fullname" . }}-prometheus:9090
+        isDefault: true
+        uid: prometheus
+      - name: Tempo
+        type: tempo
+        access: proxy
+        url: http://{{ include "otel-collector.fullname" . }}-tempo:3200
+        uid: tempo
+        editable: true
+        jsonData:
+          httpMethod: GET
+          grpcAddress: otel-collector-tempo:4317
+          nodeGraph:
+            enabled: true
+          tracesToMetrics:
+            datasourceUid: 'prometheus'
+            spanStartTimeShift: '-1h'
+            spanEndTimeShift: '1h'
+            tags:
+              - key: 'service.name'
+                value: 'service_name'
+            queries:
+              - name: 'Request rate'
+                query: 'sum(rate(traces_spanmetrics_calls_total{$$__tags}[5m]))'
+              - name: 'Error rate'
+                query: 'sum(rate(traces_spanmetrics_calls_total{$$__tags,status_code="STATUS_CODE_ERROR"}[5m]))'
+              - name: 'Duration (p95)'
+                query: 'histogram_quantile(0.95, sum(rate(traces_spanmetrics_duration_bucket{$$__tags}[5m])) by (le))'
+          serviceMap:
+            datasourceUid: 'prometheus'
+          search:
+            hide: false
+          tracesToLogs:
+            datasourceUid: 'loki'
+            spanStartTimeShift: '-1m'
+            spanEndTimeShift: '1m'
+            filterByTraceID: false
+            filterBySpanID: false
+            customQuery: true
+            query: '{service_name="${__span.tags["service.name"]}"} | trace_id = `${__trace.traceId}`'
+          lokiSearch:
+            datasourceUid: 'loki'
+      - name: Loki
+        type: loki
+        uid: loki
+        access: proxy
+        url: http://{{ include "otel-collector.fullname" . }}-loki:3100
+        editable: true
+        jsonData:
+          derivedFields:
+            - datasourceUid: 'tempo'
+              matcherRegex: '"traceID":"(\w+)"'
+              name: TraceID
+              url: '$${__value.raw}'
+{{- end }}

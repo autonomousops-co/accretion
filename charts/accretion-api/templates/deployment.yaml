@@ -1,0 +1,142 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "accretion-api.fullname" . }}
+  labels:
+    {{- include "accretion-api.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "accretion-api.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        {{- include "accretion-api.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: accretion-api
+    spec:
+      # Kubernetes injects a legacy Docker-link env var per Service in the
+      # namespace, and for the accretion-api Service that is
+      # ACCRETION_API_PORT=tcp://<clusterIP>:80. Viper reads config key api.port
+      # from ACCRETION_API_PORT, so the two collide by construction and the
+      # server fails to start with "cannot parse 'api.port' as int". Nothing here
+      # reads those variables — the chart passes what it needs explicitly and
+      # through config.yaml — so turning them off removes the whole class of
+      # collision rather than contorting a config key around it.
+      enableServiceLinks: false
+      serviceAccountName: {{ include "accretion-api.serviceAccountName" . }}
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          env:
+            # Sourced from a secret rather than templated into the command so
+            # the DB password is not baked into the rendered pod manifest or
+            # visible in the process list. psql reads PGPASSWORD from the env.
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "accretion-api.dbSecretName" . }}
+                  key: db-password
+          command: ['sh', '-c', 'until pg_isready -h {{ .Values.config.database.host }} -p {{ .Values.config.database.port }} -U {{ .Values.config.database.user }} && psql -h {{ .Values.config.database.host }} -p {{ .Values.config.database.port }} -U {{ .Values.config.database.user }} -d {{ .Values.config.database.database }} -c "SELECT 1" > /dev/null 2>&1; do echo waiting for postgres database {{ .Values.config.database.database }}; sleep 2; done;']
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["./accretion-api"]
+          args:
+            - "server"
+            - "--config"
+            - "/etc/config/config.yaml"
+            {{- if .Values.disableAuthentication }}
+            - "--disable-authentication"
+            {{- end }}
+          ports:
+            {{- if .Values.config.api.enabled }}
+            - name: api
+              containerPort: {{ .Values.config.api.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.config.ui.enabled }}
+            - name: ui
+              containerPort: {{ .Values.config.ui.port }}
+              protocol: TCP
+            {{- end }}
+          # exec rather than httpGet: a container gets one probe of each kind with
+          # a single handler, and with both listeners enabled a single httpGet
+          # would leave one of them unchecked. They run in one process but can
+          # fail independently, which is the whole point of splitting them.
+          #
+          # `accretion-api healthcheck` rather than wget: once the API listener is
+          # behind TLS a shell probe cannot verify the certificate. The runtime
+          # image is alpine, whose wget is BusyBox, and BusyBox wget has no
+          # --ca-certificate flag; installing the CA into the image trust store
+          # would need update-ca-certificates as root and the container runs as
+          # appuser. The subcommand reads this same ConfigMap, so it knows every
+          # listener's port, its scheme, and the CA path with no duplication here.
+          #
+          # timeoutSeconds is stated explicitly and must stay >= the
+          # healthcheckTimeout the subcommand enforces internally. The kubelet
+          # default is 1s, which would SIGKILL a slow probe before that internal
+          # deadline could ever fire — leaving the binary's own timeout, and the
+          # comment explaining it, permanently unreachable.
+          livenessProbe:
+            exec:
+              command: ["./accretion-api", "healthcheck", "--config", "/etc/config/config.yaml"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 6
+          readinessProbe:
+            exec:
+              command: ["./accretion-api", "healthcheck", "--config", "/etc/config/config.yaml"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 6
+          volumeMounts:
+            - name: config
+              mountPath: /etc/config
+              readOnly: true
+            {{- if .Values.config.api.tls.enabled }}
+            - name: tls
+              mountPath: {{ .Values.config.api.tls.mountPath }}
+              readOnly: true
+            {{- end }}
+          env:
+            # DB password supplied via secret rather than the ConfigMap. viper
+            # (SetEnvPrefix "ACCRETION" + AutomaticEnv) maps this to
+            # config.database.password at runtime.
+            - name: ACCRETION_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "accretion-api.dbSecretName" . }}
+                  key: db-password
+            {{- toYaml .Values.env | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "accretion-api.fullname" . }}-config
+        {{- if .Values.config.api.tls.enabled }}
+        # Whether cert-manager issued this Secret or the operator brought their
+        # own, it is the same shape here: tls.crt, tls.key, and ca.crt when the
+        # issuer is private.
+        - name: tls
+          secret:
+            secretName: {{ include "accretion-api.tlsSecretName" . }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

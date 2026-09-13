@@ -1,0 +1,146 @@
+# PostgreSQL dependency configuration
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: "postgres"
+    database: "accretion"
+  image:
+    registry: docker.io
+    repository: pgvector/pgvector
+    tag: pg16
+  primary:
+    persistence:
+      enabled: true
+      size: 8Gi
+      annotations:
+        "helm.sh/resource-policy": "keep"
+
+    # Probes, widened from the subchart defaults after postgres was killed by its
+    # own liveness probe on a 21 MB database.
+    #
+    # What happened: `pg_isready` timed out at 5s, six times running, so the
+    # kubelet restarted the container -- and accretion-api then crashlooped 24
+    # times against `connection refused`, exhausting its 10 connection retries on
+    # each attempt. Postgres was not wedged. Its checkpoint log for the minutes
+    # before the kill:
+    #
+    #   write=20.455 s, sync=1.113 s, total=24.267 s ... 68 buffers (0.4%) ... 394 kB
+    #   write=11.690 s, sync=1.852 s, total=16.964 s ... 60 buffers (0.4%) ... 327 kB
+    #
+    # 24 seconds to write 394 kB. That is the node's disk, not this database's
+    # size: the whole thing is 21 MB across 7 partitions and 2473 rows. A
+    # `pg_isready` connect competing with an fsync that slow does not answer in
+    # five seconds, and a liveness probe that kills a healthy-but-blocked database
+    # turns a slow disk into an outage plus a crashlooping API.
+    #
+    # So liveness is deliberately slack: 10s per probe and 10 consecutive
+    # failures is ~100s of unresponsiveness before a restart, which a checkpoint
+    # storm on a slow disk survives and a genuinely wedged postmaster does not.
+    # Readiness stays tighter -- it only removes the pod from Endpoints, which is
+    # the correct response to a stall and costs nothing to get wrong briefly.
+    livenessProbe:
+      enabled: true
+      timeoutSeconds: 10
+      periodSeconds: 10
+      failureThreshold: 10
+    readinessProbe:
+      enabled: true
+      timeoutSeconds: 10
+      periodSeconds: 10
+      failureThreshold: 6
+    # Enabled because the subchart leaves it off, which means liveness governs
+    # the first start too: on a cold volume, initdb plus extension creation can
+    # exceed the 30s initial delay, and the container is killed mid-initialisation.
+    # 30 x 10s gives first boot five minutes and defers liveness until it passes.
+    startupProbe:
+      enabled: true
+      timeoutSeconds: 10
+      periodSeconds: 10
+      failureThreshold: 30
+
+    # This was the only workload in the repo with no limits at all -- every other
+    # chart sets both. Steady-state usage measured 10m CPU and 42Mi.
+    #
+    # Memory: the request covers shared_buffers (160Mi, set by the image) plus
+    # maintenance_work_mem and backend overhead, which 256Mi did not. The limit
+    # is well clear of that so a growing buffer cache cannot reach it.
+    #
+    # CPU: the limit is deliberately loose at 8x the request. A tight CPU limit
+    # on a database causes CFS throttling, and a throttled postmaster fails
+    # exactly the liveness probe widened above -- the fix would cause the bug.
+    # It is here to bound a runaway, not to shape normal load.
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 1Gi
+
+    # NOT SET HERE, deliberately: `extendedConfiguration` does not work with this
+    # image, and setting it would look like tuning while changing nothing.
+    #
+    # postgres runs with effective_cache_size = 5GB and shared_buffers = 160Mi,
+    # which describe a machine this container does not have. The obvious fix is
+    # postgresql.primary.extendedConfiguration. It was tried and verified against
+    # the running pod: the subchart renders the ConfigMap, mounts it at
+    # /bitnami/postgresql/conf/conf.d/override.conf, and the file arrives with the
+    # right content -- but postgres reads /bitnami/postgresql/data/postgresql.conf,
+    # written by initdb from the pgvector image, and EVERY include directive in it
+    # is commented out:
+    #
+    #   818:#include_dir = '...'
+    #   820:#include_if_exists = '...'
+    #   821:#include = '...'
+    #
+    # `select source from pg_settings where name='effective_cache_size'` returns
+    # `default`, confirming nothing applied. A values entry that renders a
+    # ConfigMap and changes no setting is worse than an absent one, so it is
+    # absent. The mechanism that does work on this image is ALTER SYSTEM (writes
+    # postgresql.auto.conf, which the data directory does read) from the schema
+    # job -- a bigger change than this one, and filed rather than smuggled in here.
+
+# Schema initialization job
+schemaJob:
+  image: postgres:16-alpine
+  backoffLimit: 5
+
+# Partition maintenance for the time-partitioned unified_entries table.
+# Pre-creates upcoming weekly partitions and (optionally) drops old ones. This is
+# the hand-rolled replacement for pg_partman, which is not in the DB image.
+partitionMaintenance:
+  enabled: true
+  schedule: "17 1 * * *" # daily at 01:17 (cheap; a partition is created once/week)
+  aheadWeeks: 4 # pre-create partitions this many weeks ahead (minimum 1)
+  # Drop weekly partitions older than this many weeks. 0 disables retention
+  # (partitions accumulate). Enabled by default so storage stays bounded.
+  retentionWeeks: 4
+  # Archive aged-out weekly partitions to a filesystem path *before* dropping them
+  # (issue #143). Default OFF preserves today's drop-only behavior exactly. When
+  # enabled, each expired weekly partition is exported (pg_dump -Fc) to a per-week
+  # file, the export is verified, and only then is the partition dropped. A failed
+  # export aborts that partition's drop and fails the run, so aged-out data leaves
+  # a trail of per-week .dump files the operator manages out of band instead of
+  # being destroyed. The DEFAULT partition is never archived or dropped.
+  archive:
+    enabled: false
+    path: /archive # mount point inside the container; exported as ARCHIVE_PATH
+    format: pgdump # pgdump (required, custom-format pg_dump); csv is stubbed/rejected
+    # Volume source for the archive mount. When enabled, exactly one of the two
+    # below must be set (existingClaim wins); rendering fails otherwise so the
+    # archive can never silently land on an ephemeral emptyDir.
+    #
+    # A PersistentVolumeClaim by name — durable; recommended for real clusters:
+    existingClaim: ""
+    # …or a hostPath — kind/dev only (node-local, not durable across nodes):
+    hostPath: ""
+
+# Database connection configuration
+config:
+  database:
+    host: "accretion-db-postgresql"
+    port: 5432
+    user: "postgres"
+    password: "postgres"
+    database: "accretion"
+    sslmode: "disable"

@@ -1,0 +1,96 @@
+{{- $isGCP := false }}
+{{- if .Values.ollama.autoDetectGCP }}
+  {{- $isGCP = or (contains "gke" (toString .Values.global.cluster)) (contains "gcp" (toString .Values.global.cluster)) (contains "google" (toString .Values.global.cluster)) }}
+{{- end }}
+{{- if and (or .Values.ollama.enabled $isGCP) .Values.ollama.persistence.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "accretion-api.fullname" . }}-pvc-creator
+  labels:
+    {{- include "accretion-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pvc-creator
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      labels:
+        {{- include "accretion-api.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: pvc-creator
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "accretion-api.fullname" . }}
+      containers:
+        - name: pvc-creator
+          image: bitnami/kubectl:latest
+          command: ["/bin/bash"]
+          args:
+            - -c
+            - |
+              set -e
+              echo "Ensuring required PVCs exist..."
+
+              # Function to create PVC if it doesn't exist
+              create_pvc_if_missing() {
+                local pvc_name="$1"
+                local storage_class="$2"
+                local size="$3"
+
+                if kubectl get pvc "$pvc_name" -n "{{ .Release.Namespace }}" &>/dev/null; then
+                  echo "✓ PVC $pvc_name already exists"
+                else
+                  echo "Creating PVC: $pvc_name"
+                  cat <<EOF | kubectl apply -f -
+              apiVersion: v1
+              kind: PersistentVolumeClaim
+              metadata:
+                name: $pvc_name
+                namespace: {{ .Release.Namespace }}
+                labels:
+                  {{- include "accretion-api.labels" . | nindent 18 }}
+                  app.kubernetes.io/component: ollama
+              spec:
+                accessModes:
+                  - ReadWriteOnce
+                resources:
+                  requests:
+                    storage: $size
+              $(if [ -n "$storage_class" ]; then echo "  storageClassName: $storage_class"; fi)
+              EOF
+                  echo "✓ Created PVC: $pvc_name"
+                fi
+              }
+
+              # Create single-zone PVC if not using multi-zone
+              {{- if not .Values.ollama.multiZone.enabled }}
+              create_pvc_if_missing "{{ include "accretion-api.fullname" . }}-ollama-data" \
+                "{{- if $isGCP }}{{ .Values.ollama.gcp.storageClass }}{{- else }}{{ .Values.ollama.persistence.storageClass }}{{- end }}" \
+                "{{ .Values.ollama.persistence.size }}"
+              {{- end }}
+
+              # Create multi-zone PVCs if using multi-zone
+              {{- if .Values.ollama.multiZone.enabled }}
+              {{- $zones := list "us-central1-a" "us-central1-c" "us-central1-f" }}
+              {{- range $zone := $zones }}
+              create_pvc_if_missing "{{ include "accretion-api.fullname" $ }}-ollama-data-{{ $zone | replace "us-central1-" "" }}" \
+                "{{- if $isGCP }}{{ $.Values.ollama.gcp.storageClass }}{{- else }}{{ $.Values.ollama.persistence.storageClass }}{{- end }}" \
+                "{{ $.Values.ollama.persistence.size }}"
+              {{- end }}
+              {{- end }}
+
+              # Create PostgreSQL PVC if enabled and missing
+              {{- if and .Values.postgresql .Values.postgresql.enabled }}
+              create_pvc_if_missing "data-{{ include "accretion-api.fullname" . }}-postgresql-0" \
+                "{{ dig "primary" "persistence" "storageClass" "" .Values.postgresql }}" \
+                "{{ dig "primary" "persistence" "size" "8Gi" .Values.postgresql }}"
+              {{- end }}
+
+              echo "All required PVCs are ready!"
+          env:
+            - name: NAMESPACE
+              value: "{{ .Release.Namespace }}"
+  ttlSecondsAfterFinished: 300
+{{- end }}

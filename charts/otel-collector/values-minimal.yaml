@@ -1,0 +1,64 @@
+# Minimal observability profile (#94).
+#
+# "Full functionality" means everything works when enabled, not that everything
+# is deployed by default. Of the five pods this chart brings up, exactly one is
+# load-bearing for an accretion feature: Tempo backs /api/traces and
+# /api/traces/{id}. Grafana, Loki and Prometheus are developer conveniences --
+# nothing in accretion reads from them.
+#
+# So this profile keeps the collector and Tempo, and drops the other three. It
+# is not the dev default: `make up` for a contributor still gets the full stack
+# (charts/otel-collector/values.yaml), because a contributor wants Grafana.
+#
+#   helm upgrade --install otel-collector ./charts/otel-collector \
+#     --namespace obs -f charts/otel-collector/values-minimal.yaml
+#
+# To turn one back on, it is one line each:
+#   --set grafana.enabled=true      # dashboards (needs a backend below)
+#   --set loki.enabled=true         # log storage for Grafana
+#   --set prometheus.enabled=true   # metric storage for Grafana
+#
+# Each of those also needs its exporter back in the matching pipeline, which is
+# why the pipelines are rewritten below rather than left as-is. The chart's
+# guard (templates/_validation.tpl) fails the render on the mismatch rather than
+# letting the collector export into a backend that is not there.
+
+# Tempo stays: /api/traces reads from it.
+tempo:
+  enabled: true
+
+# Developer conveniences, off. No accretion feature depends on any of them.
+grafana:
+  enabled: false
+loki:
+  enabled: false
+prometheus:
+  enabled: false
+
+config:
+  service:
+    pipelines:
+      # Traces still reach Tempo, so trace read-back keeps working.
+      traces:
+        receivers: [otlp]
+        processors: [batch]
+        exporters: [debug, otlp/tempo]
+      # traces/accretion -- the RAG ingestion pipeline -- is deliberately NOT
+      # repeated here. Helm deep-merges maps from a -f file into values.yaml
+      # (chartutil.CoalesceTables) and replaces only lists, so leaving the key
+      # out keeps values.yaml's pipeline exactly as it is; the render is
+      # byte-identical with and without a copy (#102). Repeating it would mean
+      # a second copy of a security-relevant processor order to keep in sync:
+      # strip-claimed-identity must run before k8sattributes, or a sender can
+      # pre-set the namespace attribute that filter/accretion trusts. One copy,
+      # in values.yaml, asserted by `make traces-check`.
+      # Loki and Prometheus are gone, so these pipelines keep only the debug
+      # exporter rather than exporting into nothing.
+      logs:
+        receivers: [otlp]
+        processors: [batch]
+        exporters: [debug]
+      metrics:
+        receivers: [otlp]
+        processors: [batch]
+        exporters: [debug]

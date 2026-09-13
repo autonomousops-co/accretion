@@ -1,0 +1,47 @@
+# Git
+.git/
+.gitignore
+
+# Build artifacts
+build/
+bin/
+dist/
+*.exe
+*.so
+*.dylib
+
+# Go
+*.test
+*.out
+.cache/
+vendor/
+
+# Documentation
+*.md
+!Tiltfile.md
+docs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Infrastructure
+pulumi/
+terraform/
+
+# Charts (helm dependencies will be built separately)
+charts/**/charts/
+charts/**/tmpcharts/
+
+# Scripts
+scripts/legacy/
+
+# Logs
+*.log
+
+# Environment
+.env.local
+.env.*.local

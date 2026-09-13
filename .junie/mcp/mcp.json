@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "accretion": {
+      "command": "accretion-mcp",
+      "env": {
+        "ACCRETION_MCP_SECRET_NAME": "accretion-core/accretion-mcp-secrets"
+      }
+    }
+  }
+}

@@ -1,0 +1,121 @@
+{{- if .Values.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "accretion-discord.fullname" . }}
+  labels:
+    {{- include "accretion-discord.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "accretion-discord.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "accretion-discord.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: accretion-discord
+    spec:
+      # Same reasoning as accretion-api: Kubernetes injects ACCRETION_API_PORT
+      # and friends for the accretion-api Service, and this bot reads config keys
+      # under that same prefix. Nothing here uses the legacy link variables.
+      enableServiceLinks: false
+      serviceAccountName: {{ include "accretion-discord.serviceAccountName" . }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["./accretion-api"]
+          args:
+            - "discord"
+            - "--config"
+            - "/etc/config/config.yaml"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/config
+              readOnly: true
+            {{- if and .Values.api.tls.enabled .Values.api.tls.caSecretName }}
+            - name: api-ca
+              mountPath: {{ .Values.api.tls.mountPath }}
+              readOnly: true
+            {{- end }}
+          env:
+            - name: DISCORD_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "accretion-discord.secretName" . }}
+                  key: discord-bot-token
+            # The bot routes all cluster queries through accretion-api, so there
+            # is a single auth-enforced data path.
+            {{- $scheme := ternary "https" "http" .Values.api.tls.enabled }}
+            # The port is explicit. accretion-api exposes a single Service port
+            # and only changes its target's scheme under TLS, so an https:// URL
+            # with no port would resolve to :443, which nothing listens on.
+            - name: ACCRETION_API_URL
+              value: {{ .Values.api.url | default (printf "%s://accretion-api.%s.svc.cluster.local:%v" $scheme .Release.Namespace (.Values.api.port | default 80)) | quote }}
+            {{- if and .Values.api.tls.enabled .Values.api.tls.caSecretName }}
+            # Verifying, not skipping: the client refuses insecure_skip_verify
+            # for a non-loopback host anyway, and this is the in-cluster path.
+            - name: ACCRETION_API_CA_FILE
+              value: {{ printf "%s/%s" .Values.api.tls.mountPath .Values.api.tls.caSecretKey | quote }}
+            {{- end }}
+            - name: ACCRETION_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  # Not optional: a missing or misnamed key must fail the pod,
+                  # not leave the var absent so every call to accretion-api 401s.
+                  name: {{ .Values.api.secretName }}
+                  key: {{ .Values.api.secretKey }}
+            {{- if .Values.discord.guildID }}
+            - name: DISCORD_GUILD_ID
+              value: {{ .Values.discord.guildID | quote }}
+            {{- end }}
+            {{- if .Values.secret.anthropicApiKey }}
+            - name: ACCRETION_LLM_ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "accretion-discord.secretName" . }}
+                  key: anthropic-api-key
+            {{- end }}
+            {{- if .Values.secret.openaiApiKey }}
+            - name: ACCRETION_LLM_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "accretion-discord.secretName" . }}
+                  key: openai-api-key
+            {{- end }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "accretion-discord.fullname" . }}-config
+        {{- if and .Values.api.tls.enabled .Values.api.tls.caSecretName }}
+        # Only ca.crt is projected: the bot is a client and has no business
+        # holding the API's private key, which lives in this same Secret.
+        - name: api-ca
+          secret:
+            secretName: {{ .Values.api.tls.caSecretName }}
+            items:
+              - key: {{ .Values.api.tls.caSecretKey }}
+                path: {{ .Values.api.tls.caSecretKey }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end -}}

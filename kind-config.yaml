@@ -1,0 +1,36 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: accretion-dev
+containerdConfigPatches:
+- |-
+  [plugins."io.containerd.grpc.v1.cri".registry]
+    config_path = "/etc/containerd/certs.d"
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+      - |
+        kind: KubeletConfiguration
+        clusterDNS:
+          - "10.96.0.10"
+        clusterDomain: cluster.local
+        # Set ndots:2 for better DNS performance
+        resolvConf: /etc/resolv.conf
+    extraPortMappings:
+      # HTTP
+      - containerPort: 80
+        hostPort: 80
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      # HTTPS
+      - containerPort: 443
+        hostPort: 443
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+  # Two worker nodes for realistic multi-node testing
+  - role: worker
+  - role: worker

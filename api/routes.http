@@ -1,0 +1,170 @@
+## Variables
+# The API listener terminates TLS in-process (api.tls.enabled, on by default).
+# Point your client at the CA that signed it — `make up` writes it to
+# .tls/ca.crt — or set api.tls.enabled=false and switch this back to http://.
+@baseUrl = https://localhost:41337
+
+###############################################################################
+# Health
+###############################################################################
+
+### Health Check
+GET {{baseUrl}}/api/health
+
+###############################################################################
+# Chat
+###############################################################################
+
+### Chat - Simple Request
+POST {{baseUrl}}/api/chat
+Content-Type: application/json
+
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hello, what can you help me with?"
+    }
+  ],
+  "stream": false
+}
+
+### Chat - Multiple Messages
+POST {{baseUrl}}/api/chat
+Content-Type: application/json
+
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "What are the recent errors in my Kubernetes cluster?"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll analyze your cluster logs for errors."
+    },
+    {
+      "role": "user",
+      "content": "Show me the most critical ones from the last hour"
+    }
+  ],
+  "stream": false
+}
+
+### Chat - Streaming Request
+POST {{baseUrl}}/api/chat
+Content-Type: application/json
+
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Analyze the performance of my pods in the default namespace"
+    }
+  ],
+  "stream": true
+}
+
+### CORS Preflight for Chat
+OPTIONS {{baseUrl}}/api/chat
+Access-Control-Request-Method: POST
+Access-Control-Request-Headers: Content-Type
+
+###############################################################################
+# Logs
+###############################################################################
+
+### Get Logs - Default (default namespace, limit 50)
+GET {{baseUrl}}/api/logs
+
+### Get Logs - Specific Namespace
+GET {{baseUrl}}/api/logs?namespace=default
+
+### Get Logs - Custom Limit
+GET {{baseUrl}}/api/logs?limit=100
+
+### Get Logs - Specific Namespace and Limit
+GET {{baseUrl}}/api/logs?namespace=monitoring&limit=25
+
+###############################################################################
+# Resources
+###############################################################################
+
+### Get Resources - All types
+GET {{baseUrl}}/api/resources
+
+### Get Resources - Filter by type (comma-separated)
+GET {{baseUrl}}/api/resources?types=pod_status,deployment_status
+
+### Get Resources - Filter by namespace
+GET {{baseUrl}}/api/resources?namespace=default
+
+### Get Resources - Filter by name (substring match)
+GET {{baseUrl}}/api/resources?name=accretion
+
+### Get Resources - With time window
+GET {{baseUrl}}/api/resources?start_time=2026-03-07T00:00:00Z&end_time=2026-03-07T23:59:59Z
+
+### Get Resources - Exact data filter (df.key=value)
+GET {{baseUrl}}/api/resources?types=event&df.event_type=Warning
+
+### Get Resources - Substring data filter (dc.key=value)
+GET {{baseUrl}}/api/resources?types=event&dc.reason=BackOff
+
+### Get Resources - Combined filters with limit
+GET {{baseUrl}}/api/resources?types=pod_status&namespace=default&limit=10
+
+###############################################################################
+# Stats
+###############################################################################
+
+### Get Resource Stats (counts by type and namespace)
+GET {{baseUrl}}/api/stats
+
+###############################################################################
+# Traces (Tempo)
+###############################################################################
+
+### Search Traces
+GET {{baseUrl}}/api/traces?service=accretion-api&limit=10
+
+### Search Traces with duration filter
+GET {{baseUrl}}/api/traces?service=accretion-api&minDuration=100ms&limit=10
+
+### Search Traces with time window
+GET {{baseUrl}}/api/traces?service=accretion-api&start=2026-03-07T00:00:00Z&end=2026-03-07T23:59:59Z
+
+### Get Trace by ID
+GET {{baseUrl}}/api/traces/abc123def456
+
+###############################################################################
+# Auth
+###############################################################################
+
+### OAuth Login (redirects to provider)
+GET {{baseUrl}}/auth/login
+
+### OAuth Callback (called by provider)
+GET {{baseUrl}}/auth/callback
+
+### Logout
+GET {{baseUrl}}/auth/logout
+
+### Get Current User Info
+GET {{baseUrl}}/auth/user
+
+###############################################################################
+# Static / Web UI
+###############################################################################
+
+### Main Page (requires auth)
+GET {{baseUrl}}/
+
+### Static File - JavaScript
+GET {{baseUrl}}/static/script.js
+
+### Static File - CSS
+GET {{baseUrl}}/static/styles.css
+
+### Static File - HTML
+GET {{baseUrl}}/static/index.html

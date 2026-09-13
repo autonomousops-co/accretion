@@ -1,0 +1,14 @@
+apiVersion: v2
+name: otel-collector
+description: OpenTelemetry Collector for forwarding metrics and traces
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - observability
+  - opentelemetry
+  - monitoring
+  - tracing
+  - metrics
+maintainers:
+  - name: Accretion API Team

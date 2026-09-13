@@ -1,0 +1,52 @@
+{{- if .Values.ollama.multiZone.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "accretion-api.fullname" . }}-ollama-discovery
+  labels:
+    {{- include "accretion-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama-discovery
+data:
+  # Ollama endpoints for multi-zone discovery
+  ollama-endpoints.yaml: |
+    primary:
+      url: "http://{{ include "accretion-api.fullname" . }}-ollama:11434"
+      zone: "{{ .Values.global.cluster | default "local" }}"
+      priority: 1
+
+    fallbacks:
+    {{- range $index, $zone := .Values.ollama.multiZone.zones }}
+      - url: "http://{{ include "accretion-api.fullname" $ }}-ollama-{{ $zone }}:11434"
+        zone: "{{ $zone }}"
+        priority: {{ add $index 2 }}
+    {{- end }}
+
+    {{- if .Values.ollama.multiZone.externalInstances }}
+    external:
+    {{- range .Values.ollama.multiZone.externalInstances }}
+      - url: "http://{{ .host }}:{{ .port | default 11434 }}"
+        zone: "{{ .zone }}"
+        priority: {{ .priority | default 10 }}
+    {{- end }}
+    {{- end }}
+
+  # Health check script for Ollama endpoints
+  health-check.sh: |
+    #!/bin/bash
+    check_ollama_health() {
+        local url=$1
+        local timeout=${2:-5}
+
+        if curl -f -s --max-time $timeout "$url/api/tags" >/dev/null 2>&1; then
+            echo "healthy"
+            return 0
+        else
+            echo "unhealthy"
+            return 1
+        fi
+    }
+
+    # Export the function for use by other scripts
+    export -f check_ollama_health
+
+{{- end }}

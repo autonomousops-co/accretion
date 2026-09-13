@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Accretion - Kubernetes Log Analysis</title>
+    <meta name="theme-color" content="#181825">
+    <meta name="color-scheme" content="dark">
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="header-content">
+                <div class="title-section">
+                    <h1>Accretion</h1>
+                    <p>AI-powered Kubernetes log analysis</p>
+                </div>
+                <div class="user-section" id="userSection" hidden>
+                    <div class="user-info">
+                        <img id="userAvatar" src="" alt="User Avatar" class="user-avatar">
+                        <div class="user-details">
+                            <span id="userName" class="user-name"></span>
+                            <span id="userEmail" class="user-email"></span>
+                        </div>
+                    </div>
+                    <button id="logoutBtn" class="logout-btn">Logout</button>
+                </div>
+                <div class="auth-section" id="authSection">
+                    <button id="loginBtn" class="login-btn">Login with Google</button>
+                </div>
+            </div>
+        </header>
+
+        <div class="chat-layout">
+            <aside class="sidebar" aria-label="Conversation history">
+                <div class="sidebar-header">
+                    <h2 class="sidebar-title">Conversations</h2>
+                    <button id="newConversationBtn" class="new-conversation-btn" aria-label="Start a new conversation">
+                        + New
+                    </button>
+                </div>
+                <ul id="conversationList" class="conversation-list" aria-live="polite">
+                    <!-- Conversation items rendered by JS -->
+                </ul>
+            </aside>
+
+            <main class="chat-main">
+                <div class="response-panel">
+                    <h3>Response</h3>
+                    <div id="responseArea" class="response-area" data-response-area>
+                        <div class="welcome-message">
+                            <div class="welcome-icon" aria-hidden="true">
+                                <svg width="40" height="40" viewBox="0 0 24 24" fill="none"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                            </div>
+                            <h2 class="welcome-title">How can I help?</h2>
+                            <p class="welcome-subtitle">Ask about your Kubernetes logs, metrics, and cluster health.</p>
+                            <div class="suggested-prompts" role="list" aria-label="Suggested prompts">
+                                <button class="suggested-prompt" role="listitem" data-prompt="Show me recent error logs across all namespaces">Show me recent error logs</button>
+                                <button class="suggested-prompt" role="listitem" data-prompt="Which pods have restarted the most in the last hour?">Which pods restarted recently?</button>
+                                <button class="suggested-prompt" role="listitem" data-prompt="Summarize the health of my cluster">Summarize cluster health</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="input-panel">
+                    <div class="input-section">
+                        <h3>Query</h3>
+                        <textarea
+                            id="queryInput"
+                            placeholder="Ask about your Kubernetes logs and metrics..."
+                            rows="4"
+                            aria-label="Query input"
+                        ></textarea>
+                        <div class="input-actions">
+                            <button id="sendButton" class="send-btn" aria-label="Send message">
+                                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M1.5 1.5L14.5 8L1.5 14.5V9.5L10 8L1.5 6.5V1.5Z" fill="currentColor"/></svg>
+                                Send
+                            </button>
+                            <button id="stopButton" class="stop-btn" hidden aria-label="Stop generating">
+                                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><rect x="1" y="1" width="12" height="12" rx="2" fill="currentColor"/></svg>
+                                Stop
+                            </button>
+                        </div>
+                    </div>
+                    <!-- Developer-only: triggers scroll diagnostics to validate chat auto-scroll behavior. Hidden by default. -->
+                    <button id="testScrollBtn" class="secondary-btn" aria-hidden="true">Test Scroll</button>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <div id="loadingIndicator" class="loading-indicator" hidden>
+        <div class="spinner"></div>
+        <span>Processing your query&hellip;</span>
+    </div>
+
+    <!-- Markdown & sanitization libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

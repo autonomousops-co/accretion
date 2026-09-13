@@ -1,0 +1,11 @@
+apiVersion: v2
+name: accretion-db
+description: PostgreSQL database and schema for Accretion platform
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+dependencies:
+  - name: postgresql
+    version: 13.2.24
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled

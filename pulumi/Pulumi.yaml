@@ -1,0 +1,6 @@
+name: accretion-infrastructure
+description: Infrastructure as Code for Accretion API platform (GKE, VPC, DNS, Secrets)
+runtime:
+  name: go
+  options:
+    binary: accretion-infrastructure

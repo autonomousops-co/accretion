@@ -1,0 +1,126 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "accretion-api.fullname" . }}-config
+  labels:
+    {{- include "accretion-api.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    # Disabling the UI drops the web interface, its static assets, and the
+    # /auth/* OAuth routes that exist only to log a human into it. What remains
+    # is /api/* behind API keys plus /api/health, which needs no browser
+    # reachability and no OAuth client.
+    ui:
+      enabled: {{ .Values.config.ui.enabled }}
+      port: {{ .Values.config.ui.port }}
+
+    api:
+      enabled: {{ .Values.config.api.enabled }}
+      port: {{ .Values.config.api.port }}
+      # Response write deadline; must cover /api/chat's non-streaming RAG LLM calls.
+      write_timeout: {{ .Values.config.api.writeTimeout | default "120s" | quote }}
+      {{- $tls := .Values.config.api.tls }}
+      # Certificate paths are derived from the mount path rather than configured
+      # separately, so there is exactly one place that decides where the Secret
+      # lands and no way for the two to drift.
+      tls:
+        enabled: {{ $tls.enabled }}
+        {{- if $tls.enabled }}
+        cert_file: {{ printf "%s/tls.crt" $tls.mountPath | quote }}
+        key_file: {{ printf "%s/tls.key" $tls.mountPath | quote }}
+        min_version: {{ $tls.minVersion | default "1.2" | quote }}
+        {{- /*
+        The CA clients verify against. cert-manager writes ca.crt into the same
+        Secret alongside the keypair, so with an issued certificate this needs no
+        configuration. A bring-your-own Secret may hold a publicly-trusted
+        certificate, in which case the system pool is right and this stays empty;
+        set config.api.tls.caFile explicitly if your Secret does carry a ca.crt.
+        */}}
+        {{- $caFile := $tls.caFile | default "" }}
+        {{- if and (not $caFile) $tls.certManager.enabled (not $tls.existingSecret) }}
+        {{- $caFile = printf "%s/ca.crt" $tls.mountPath }}
+        {{- end }}
+        ca_file: {{ $caFile | quote }}
+        {{- end }}
+
+    server:
+      host: {{ .Values.config.server.host | quote }}
+
+    database:
+      host: {{ .Values.config.database.host | quote }}
+      port: {{ .Values.config.database.port }}
+      user: {{ .Values.config.database.user | quote }}
+      # password intentionally omitted: supplied at runtime via the
+      # ACCRETION_DATABASE_PASSWORD env var (secretKeyRef) so it is never
+      # written into this ConfigMap. See templates/secret.yaml.
+      database: {{ .Values.config.database.database | quote }}
+      sslmode: {{ .Values.config.database.sslmode | quote }}
+
+    llm:
+      provider: {{ .Values.config.llm.provider | quote }}
+      openai:
+        base_url: {{ .Values.config.llm.openai.base_url | quote }}
+        model: {{ .Values.config.llm.openai.model | quote }}
+      ollama:
+        {{- $isGCP := false }}
+        {{- if .Values.ollama.autoDetectGCP }}
+          {{- $isGCP = or (contains "gke" (toString .Values.global.cluster)) (contains "gcp" (toString .Values.global.cluster)) (contains "google" (toString .Values.global.cluster)) }}
+        {{- end }}
+        {{- if or .Values.ollama.enabled $isGCP }}
+          {{- if .Values.ollama.multiZone.enabled }}
+        base_url: "http://{{ include "accretion-api.fullname" . }}-ollama-loadbalancer:{{ .Values.ollama.service.port }}"
+          {{- else }}
+        base_url: "http://{{ include "accretion-api.fullname" . }}-ollama:{{ .Values.ollama.service.port }}"
+          {{- end }}
+        {{- else }}
+        base_url: {{ .Values.config.llm.ollama.base_url | quote }}
+        {{- end }}
+        model: {{ .Values.ollama.models.chat | quote }}
+      embedding_model: {{ .Values.ollama.models.embedding | quote }}
+      chat_model: {{ .Values.ollama.models.chat | quote }}
+
+    k8s:
+      config_path: {{ .Values.config.k8s.config_path | quote }}
+      namespaces:
+        {{- toYaml .Values.config.k8s.namespaces | nindent 8 }}
+
+    # Named, scoped API-key identities — one per client. Only the SHA-256
+    # digest is delivered here; the plaintext key lives in the client-keys
+    # Secret (templates/secret.yaml) or is distributed out-of-band. Helm's
+    # sha256sum is byte-identical to `printf '%s' "$KEY" | shasum -a 256`, so a
+    # `key` entry needs no hand-copied digest.
+    auth:
+      {{- if .Values.apiKeys }}
+      api_key_identities:
+        {{- range $id := .Values.apiKeys }}
+        - name: {{ $id.name | quote }}
+          {{- if $id.hash }}
+          hash: {{ $id.hash | lower | quote }}
+          {{- else }}
+          hash: {{ sha256sum $id.key | quote }}
+          {{- end }}
+          {{- with $id.roles }}
+          roles:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          permissions:
+            {{- toYaml $id.permissions | nindent 12 }}
+        {{- end }}
+      {{- else }}
+      api_key_identities: []
+      {{- end }}
+
+    logging:
+      level: {{ .Values.config.logging.level | quote }}
+      format: {{ .Values.config.logging.format | quote }}
+
+    telemetry:
+      enabled: {{ .Values.config.telemetry.enabled }}
+      endpoint: {{ .Values.config.telemetry.endpoint | quote }}
+      sample_rate: {{ .Values.config.telemetry.sample_rate }}
+      insecure: {{ .Values.config.telemetry.insecure }}
+      logs_enabled: {{ .Values.config.telemetry.logs_enabled }}
+
+    tempo:
+      enabled: {{ .Values.config.tempo.enabled }}
+      base_url: {{ .Values.config.tempo.base_url | quote }}

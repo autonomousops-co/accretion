@@ -1,0 +1,107 @@
+# Example values file for accretion-api: a complete, self-contained local
+# install (bundled Postgres, host Ollama, one API-key identity).
+
+replicaCount: 1
+
+image:
+  repository: accretion-api
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  # One Service port per listener; they must differ.
+  uiPort: 8081
+
+# Application configuration
+config:
+  server:
+    host: "0.0.0.0"
+
+  database:
+    host: "accretion-db-postgresql.accretion-db.svc.cluster.local"
+    port: 5432
+    user: "postgres"
+    password: "postgres"
+    database: "accretion"
+    sslmode: "disable"
+
+  llm:
+    provider: "ollama"
+    openai:
+      base_url: "https://api.openai.com/v1"
+      model: "gpt-4"
+    ollama:
+      base_url: "http://host.docker.internal:11434"
+      model: "llama3:latest"
+    embedding_model: "nomic-embed-text:latest"
+    chat_model: "llama3:latest"
+
+  k8s:
+    config_path: ""
+    namespaces:
+      - "default"
+    poll_interval: "30s"
+
+  logging:
+    level: "debug"
+    format: "json"
+
+# One identity per caller; see charts/accretion-api/values.yaml for the full
+# schema.
+#
+# SECURITY: this is a checked-in example meant to be installed as-is — with an
+# Ingress. It therefore must never carry a usable credential. The all-zeros
+# digest below has no known preimage, so no bearer token can ever match it: an
+# unmodified example install authenticates nobody.
+# Replace it with your own `printf '%s' "$KEY" | shasum -a 256`. Never put a
+# plaintext `key` here — the guard cannot tell an example key from a real one.
+#
+# security.forbidPlaintextAPIKeys is deliberately NOT set here, unlike
+# values-dev.yaml: this file inherits the safe `true` default from values.yaml
+# and needs no opt-out, because it uses `hash` only. That is also why it must
+# STAY hash-only — adding a plaintext `key` for convenience would make this,
+# the file a new user copies first, fail to render.
+apiKeys:
+  - name: accretion-mcp
+    hash: "0000000000000000000000000000000000000000000000000000000000000000"
+    permissions: ["read:memory", "chat:query"]
+
+# PostgreSQL dependency configuration
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: "postgres"
+    database: "accretion"
+  image:
+    registry: docker.io
+    repository: pgvector/pgvector
+    tag: pg16
+  primary:
+    initdb:
+      scripts:
+        init.sql: |
+          CREATE EXTENSION IF NOT EXISTS vector;
+
+# Ollama deployment - disabled (using host machine Ollama)
+ollama:
+  enabled: false
+
+# RBAC settings
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# Environment variables
+env:
+  - name: ACCRETION_LLM_OPENAI_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: accretion-api-secrets
+        key: openai-api-key
+        optional: true

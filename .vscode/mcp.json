@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "accretion": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/build/accretion-mcp",
+      "env": {
+        "ACCRETION_MCP_SECRET_NAME": "accretion-core/accretion-mcp-secrets"
+      }
+    }
+  }
+}

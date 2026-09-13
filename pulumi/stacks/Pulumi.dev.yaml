@@ -1,0 +1,18 @@
+config:
+  gcp:project: accretion-api-dev
+  gcp:region: us-central1
+  gcp:zone: us-central1-a
+  accretion-infrastructure:environment: dev
+  accretion-infrastructure:clusterName: accretion-api-dev
+  accretion-infrastructure:namespace: accretion-core
+  accretion-infrastructure:machineType: e2-medium
+  accretion-infrastructure:nodeCount: 1
+  accretion-infrastructure:minNodes: 1
+  accretion-infrastructure:maxNodes: 3
+  accretion-infrastructure:diskSizeGb: "50"
+  accretion-infrastructure:domain: dev.accretion-api.dev
+  accretion-infrastructure:enableCollector: "true"
+  accretion-infrastructure:imageTag: latest
+  accretion-infrastructure:dbInstanceTier: db-f1-micro
+  accretion-infrastructure:dbDiskSizeGb: "10"
+  accretion-infrastructure:dbHighAvailability: "false"

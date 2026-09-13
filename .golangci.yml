@@ -1,0 +1,153 @@
+version: "2"
+
+run:
+  issues-exit-code: 1
+  tests: true
+  build-tags: []
+  modules-download-mode: readonly
+
+output:
+  formats:
+    text:
+      path: stdout
+      colors: true
+
+linters:
+  enable:
+    - bodyclose
+    - errcheck
+    - funlen
+    - goconst
+    - gocritic
+    - gocyclo
+    - godox
+    - govet
+    - ineffassign
+    - lll
+    - misspell
+    - nakedret
+    - prealloc
+    - staticcheck
+    - unparam
+    - unused
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      # `_ = f()` is how Go says "deliberately ignored". With check-blank on there
+      # is no way to express that except a //nolint at every site, which is more
+      # noise than signal; an accidental ignore is still caught, because leaving
+      # the value off entirely is what errcheck flags.
+      check-blank: false
+
+    funlen:
+      lines: 100
+      statements: 65
+
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - experimental
+        - opinionated
+        - performance
+        - style
+      disabled-checks:
+        - dupImport
+        - ifElseChain
+        - unnamedResult
+      settings:
+        hugeParam:
+          # gocritic's 80-byte default is aggressive for this codebase. The structs
+          # it flagged are 104 (config.NamespaceSelector), 128 (llm.ContentBlock)
+          # and 136 (zapcore.Entry) bytes — small enough that copying costs nothing
+          # against the embedding and database work on the same paths, and all
+          # three are used with deliberate value semantics.
+          #
+          # Two of the reports could not be acted on in any case: recordingCore's
+          # Check and Write implement zapcore.Core, whose signatures are fixed by
+          # the interface. Three more are value receivers on NamespaceSelector,
+          # where a pointer receiver would stop callers writing
+          # cfg.TraceNamespaceSelector().NeedsExpansion() — a method call on a
+          # non-addressable return value does not compile.
+          #
+          # Raised to 144 rather than disabled, so a genuinely large parameter is
+          # still reported.
+          sizeThreshold: 144
+
+    gocyclo:
+      min-complexity: 15
+
+    godox:
+      keywords:
+        - NOTE
+        - OPTIMIZE
+        - HACK
+
+    govet:
+      enable-all: true
+      disable:
+        # Reorders struct fields by size to save padding. The config structs here
+        # are grouped semantically and mirror the YAML they unmarshal from, and
+        # nothing in this codebase is bottlenecked on a few bytes per struct.
+        - fieldalignment
+
+    lll:
+      line-length: 120
+
+    misspell:
+      locale: US
+
+  exclusions:
+    # v1 applied these built-in exclusion sets by default; v2 requires opting in.
+    # Without them the migration would silently tighten what is reported, which
+    # is a different change from moving to v2.
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - vendor
+      - old
+      - charts
+      - web/static
+      - tmp
+      - .cache
+      - build
+    rules:
+      - path: _test\.go
+        linters:
+          - funlen
+          - goconst
+          # Same reasoning as funlen above: a table-driven test enumerating cases
+          # is branchy by construction, and that is not the complexity gocyclo is
+          # meant to police.
+          - gocyclo
+          - lll
+
+      - linters:
+          - lll
+        source: "^//go:generate "
+
+      - linters:
+          - errcheck
+        text: "Error return value of .((os\\.)?std(out|err)\\..*|.*Close|.*Flush|os\\.Remove(All)?|.*printf?|os\\.(Un)?Setenv|.*\\.Sync|.*\\.BindEnv). is not checked"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - github.com/autonomousops-co/accretion
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
