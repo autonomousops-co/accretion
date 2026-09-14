@@ -1,5 +1,27 @@
 # Accretion
 
+<!-- TOC -->
+* [What it is](#what-it-is)
+* [What it remembers](#what-it-remembers)
+* [Quick Start (local)](#quick-start-local)
+  * [Run the stack](#run-the-stack)
+  * [Connect an agent](#connect-an-agent)
+  * [Watch your own namespace](#watch-your-own-namespace)
+* [Connect an agent (MCP)](#connect-an-agent-mcp)
+* [How it works](#how-it-works)
+* [Components](#components)
+* [TLS](#tls)
+* [API keys](#api-keys)
+  * [Giving someone access](#giving-someone-access)
+* [Quick Start (cluster deployment)](#quick-start-cluster-deployment)
+  * [The minimal install: what is off, and the one line that turns it back on](#the-minimal-install-what-is-off-and-the-one-line-that-turns-it-back-on)
+* [Documentation](#documentation)
+* [Key technical facts](#key-technical-facts)
+* [Configuration](#configuration)
+* [Contributing](#contributing)
+* [License](#license)
+<!-- TOC -->
+
 > **ac·cre·tion** *n.* — [L. *accretio*, fr. *accrescere* to increase.]
 >
 > 1. The act of increasing by natural growth; esp. the increase of organic bodies by the internal
@@ -10,6 +32,7 @@
 >
 > — *Webster's Revised Unabridged Dictionary* (1913)
 
+## What it is
 **Durable, semantically-searchable memory of your Kubernetes clusters — built for AI agents.**
 
 LLM agents are stateless, with no window into a cluster's operational history. Accretion fills that
@@ -55,6 +78,53 @@ the event.
 **Kubernetes Secrets are not collected.** Not their values and not their metadata: the chart grants
 no verb on them, so cluster secrets stay out of the store entirely. See
 [`internal/k8s/statusinformers.go`](internal/k8s/statusinformers.go).
+
+## How it works
+
+Three planes: **capture → store → recall.**
+
+```mermaid
+flowchart LR
+    subgraph Clusters["Kubernetes cluster(s)"]
+        API_SERVER["kube-apiserver<br/>+ metrics-server"]
+        OTLP["app traces (OTLP)"]
+    end
+
+    subgraph Capture["Capture - accretion-collector"]
+        COLL["dispatcher<br/>(pod informer; in-process queue,<br/>or Redis when scaled)"]
+        LW["data-collector<br/>log / metric / event / trace<br/>(splittable per collector)"]
+        PW["status-collector<br/>eight object-state kinds"]
+        TW["OTLP receiver<br/>(:4318, inside data-collector)"]
+    end
+
+    subgraph Store["Store"]
+        PG[("PostgreSQL + pgvector<br/>unified_entries<br/>vector embeddings, weekly partitions")]
+    end
+
+    subgraph Recall["Recall"]
+        APISVR["accretion-api<br/>(REST + RAG chat)"]
+        MCP["accretion-mcp<br/>(MCP tools, stdio)"]
+        BOT["Discord bot"]
+        WEB["Web UI"]
+    end
+
+    AGENT(["AI agent / human"])
+
+    API_SERVER --> COLL
+    COLL --> LW
+    API_SERVER --> PW
+    OTLP --> TW
+    LW -- embed + insert --> PG
+    PW -- embed + insert --> PG
+    TW -- embed + insert --> PG
+    APISVR -- cosine search --> PG
+    PG -- matches --> APISVR
+    APISVR --> MCP
+    MCP --> AGENT
+    APISVR --> WEB
+    APISVR --> BOT
+    BOT --> AGENT
+```
 
 ## Quick Start (local)
 
@@ -322,53 +392,6 @@ A missing `ACCRETION_API_URL` exits 1 with a message on stderr — the usual cau
 the server as "failed to start".
 
 ---
-
-## How it works
-
-Three planes: **capture → store → recall.**
-
-```mermaid
-flowchart LR
-    subgraph Clusters["Kubernetes cluster(s)"]
-        API_SERVER["kube-apiserver<br/>+ metrics-server"]
-        OTLP["app traces (OTLP)"]
-    end
-
-    subgraph Capture["Capture - accretion-collector"]
-        COLL["dispatcher<br/>(pod informer; in-process queue,<br/>or Redis when scaled)"]
-        LW["data-collector<br/>log / metric / event / trace<br/>(splittable per collector)"]
-        PW["status-collector<br/>eight object-state kinds"]
-        TW["OTLP receiver<br/>(:4318, inside data-collector)"]
-    end
-
-    subgraph Store["Store"]
-        PG[("PostgreSQL + pgvector<br/>unified_entries<br/>vector embeddings, weekly partitions")]
-    end
-
-    subgraph Recall["Recall"]
-        APISVR["accretion-api<br/>(REST + RAG chat)"]
-        MCP["accretion-mcp<br/>(MCP tools, stdio)"]
-        BOT["Discord bot"]
-        WEB["Web UI"]
-    end
-
-    AGENT(["AI agent / human"])
-
-    API_SERVER --> COLL
-    COLL --> LW
-    API_SERVER --> PW
-    OTLP --> TW
-    LW -- embed + insert --> PG
-    PW -- embed + insert --> PG
-    TW -- embed + insert --> PG
-    APISVR -- cosine search --> PG
-    PG -- matches --> APISVR
-    APISVR --> MCP
-    MCP --> AGENT
-    APISVR --> WEB
-    APISVR --> BOT
-    BOT --> AGENT
-```
 
 - **Capture** — three collector processes turn cluster signals into records: `data-collector`
   (log, metric, event), a split-out `trace-collector` (the OTLP receiver), and `status` (object
