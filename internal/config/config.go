@@ -781,10 +781,26 @@ func bindEnvVars() {
 }
 
 func GenerateDefault(outputFile string) error {
-	// NewAuthManager rejects any session key that is not hex of at least 64
-	// characters (32 decoded bytes), so emit a real one — a generated config
-	// must be usable as-is. crypto/rand only: a predictable signing key would
-	// be worse than an invalid one, because it would work.
+	// WRONG, and tracked by #129: this writes a live signing key into a YAML
+	// file. Keeping secrets hidden outranks every other concern, so a generated
+	// config must carry no secret at all — auth.session_key belongs in the
+	// gitignored .env (SESSION_KEY, bound above) or a Kubernetes Secret read
+	// through secretKeyRef, never in a file this command hands you. #112 already
+	// made exactly this move for database.password and queue.redis_password.
+	//
+	// The justification this comment used to give was that "a generated config
+	// must be usable as-is". Ease of use is about non-secret configuration —
+	// ports, namespaces, providers, structure — not a reason to pre-populate a
+	// credential. Absent a key, NewAuthManager already fails closed and names
+	// the variable to set, which is the correct outcome, not a defect to paper
+	// over.
+	//
+	// The one part of the old reasoning that still holds: do NOT "fix" this by
+	// emitting a fake or fixed placeholder key. A predictable signing key is
+	// worse than an absent one, because it would work. Emit nothing.
+	//
+	// Until #129 lands, crypto/rand only, and the output stays 0600 and
+	// gitignored.
 	sessionKey := make([]byte, 32)
 	if _, err := rand.Read(sessionKey); err != nil {
 		return fmt.Errorf("generating session key: %w", err)
