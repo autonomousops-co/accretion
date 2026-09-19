@@ -1143,7 +1143,21 @@ secrets-identity-check: ## Verify each identity's hash is the digest of its plai
 # the one key the gate is structurally blind to. Within a secretKeyRef block the
 # only lines adjacent to `name:` are `key:`, `name:` and `optional:`, so looking
 # both ways adds no false positives.
-secrets-keys-check: ## Verify make-secret.sh emits exactly the Secret keys the chart reads
+#
+# TWO Secrets since #135. accretion-discord-secrets was previously beyond this
+# gate's reach for a real reason: the script emitted only one of its four keys,
+# and the other three arrived as plaintext `--set` flags out of the Tiltfile, so
+# there was no script-side list to diff against. Now that the script owns all
+# four, the same comparison applies -- exact in both directions, because a key
+# the bot reads and the script does not emit fails the pod at rollout, while a
+# key the script emits and nothing reads is dead weight that outlives whatever
+# removed its reader. The bot is rendered from the REAL deploy/tilt.yaml subtree,
+# read back through helm itself (the one parser these gates may depend on),
+# rather than from flags transcribed here -- so the values under test are the
+# values that deploy. The count assertion is the vacuity guard: a chart that
+# stopped reading a key would otherwise agree with a script that stopped
+# emitting it.
+secrets-keys-check: ## Verify make-secret.sh emits exactly the Secret keys the charts read
 	@echo "$(BLUE)Diffing script Secret keys against the chart's secretKeyRefs...$(NC)"
 	@bash -c 'set -eo pipefail; \
 		d=$$(mktemp -d); trap "rm -rf $$d" EXIT; \
@@ -1162,7 +1176,27 @@ secrets-keys-check: ## Verify make-secret.sh emits exactly the Secret keys the c
 		if ! diff -u $$d/script $$d/envexample; then \
 			printf "%b\n" "$(RED)env.example annotations drifted: < script emits, > env.example documents$(NC)"; exit 1; \
 		fi; \
-		printf "%b\n" "$(GREEN)Secret keys match the chart, and env.example documents them$(NC)"'
+		printf "%b\n" "  ok  accretion-api-secrets: $$(wc -l < $$d/script | tr -d " ") keys match the chart, and env.example documents them"; \
+		bash scripts/make-secret.sh --print-discord-keys | sort -u > $$d/dscript; \
+		r=$$d/reader; mkdir -p $$r/templates; \
+		printf "apiVersion: v2\nname: subtreereader\nversion: 0.0.0\n" > $$r/Chart.yaml; \
+		printf "SUBTREE: {{ toJson (index .Values \"accretion-discord\") }}\n" > $$r/templates/dump.yaml; \
+		helm template subtreereader $$r -f deploy/tilt.yaml | sed -n "s/^SUBTREE: //p" | head -1 > $$d/dvalues.json; \
+		if [ ! -s $$d/dvalues.json ] || grep -qx "null" $$d/dvalues.json; then \
+			printf "%b\n" "$(RED)could not read the accretion-discord subtree out of deploy/tilt.yaml, so the bot would be rendered on chart defaults and this comparison would mean nothing$(NC)"; exit 1; \
+		fi; \
+		helm template accretion-discord ./charts/accretion-discord -f $$d/dvalues.json > $$d/discord.yaml; \
+		{ grep -B1 "name: accretion-discord-secrets" $$d/discord.yaml; \
+		  grep -A1 "name: accretion-discord-secrets" $$d/discord.yaml; } \
+			| grep -oE "key: [a-z0-9-]+" | awk "{print \$$2}" | sort -u > $$d/dchart; \
+		if ! diff -u $$d/dchart $$d/dscript; then \
+			printf "%b\n" "$(RED)accretion-discord-secrets key mismatch: < the bot reads, > the script emits$(NC)"; exit 1; \
+		fi; \
+		n=$$(wc -l < $$d/dchart | tr -d " "); \
+		[ "$$n" -eq 4 ] || { \
+			printf "%b\n" "$(RED)the bot reads $$n keys from accretion-discord-secrets, expected 4 (its own API key, the Discord token and the two model keys). A render that reads fewer is not proof of agreement, it is a chart that stopped asking.$(NC)"; exit 1; }; \
+		printf "%b\n" "  ok  accretion-discord-secrets: the bot reads exactly the 4 keys the script emits"; \
+		printf "%b\n" "$(GREEN)Secret keys match the charts, and env.example documents them$(NC)"'
 
 # The declare -A regression (#54): macOS ships bash 3.2 as /bin/bash and Tilt
 # invokes the script as `bash scripts/make-secret.sh`, bypassing the shebang.
@@ -1196,7 +1230,17 @@ secrets-portability-check: ## Verify make-secret.sh runs under /bin/bash 3.2 (ma
 # that resolves to NOTHING is a hard failure rather than a silently dropped row:
 # dropping it is exactly how this gate would go back to reporting a false
 # missing key, or worse, stop noticing a real one.
-secrets-pulumi-check: ## Verify pulumi's Secret provisions every key make-secret.sh emits
+# BOTH Secrets since #135. accretion-discord-secrets was explicitly out of this
+# gate's reach, and values.go said so in two parts: the script emitted none of
+# those keys, and the extraction above matches literal `"key": pulumi.String()`
+# pairs, which building a Secret from a []string does not produce. The first
+# half stopped being true when the script took ownership of the bot token and
+# the model keys, so the list is read from DiscordSecretKeys() directly -- its
+# string literals, plus the api-key-<identity> entry rebuilt the way
+# DiscordAPIKeySecretKey() builds it. That last bit is the one duplication here
+# and it is named: the "api-key-" prefix lives in that function too, and the two
+# must move together.
+secrets-pulumi-check: ## Verify pulumi provisions every Secret key make-secret.sh emits
 	@echo "$(BLUE)Diffing script Secret keys against pulumi's Secret...$(NC)"
 	@bash -c 'set -eo pipefail; \
 		d=$$(mktemp -d); trap "rm -rf $$d" EXIT; \
@@ -1222,7 +1266,28 @@ secrets-pulumi-check: ## Verify pulumi's Secret provisions every key make-secret
 			printf "%b\n" "$(RED)pulumi/pkg/kubernetes/secrets.go is missing Secret keys make-secret.sh emits:$(NC)"; \
 			sed "s/^/  /" $$d/only; exit 1; \
 		fi; \
-		printf "%b\n" "$(GREEN)pulumi provisions all $$(wc -l < $$d/script | tr -d " ") script Secret keys$(NC)"'
+		printf "%b\n" "  ok  accretion-api-secrets: pulumi provisions all $$(wc -l < $$d/script | tr -d " ") script Secret keys"; \
+		bash scripts/make-secret.sh --print-discord-keys | sort -u > $$d/dscript; \
+		awk "/^func DiscordSecretKeys\(\)/,/^}/" pulumi/pkg/config/values.go > $$d/dk.go; \
+		sed -nE "s/^[[:space:]]*\"([a-z0-9-]+)\",?[[:space:]]*\$$/\1/p" $$d/dk.go > $$d/dpulumi.raw; \
+		if grep -q "DiscordAPIKeySecretKey()" $$d/dk.go; then \
+			id=$$(sed -nE "s/^[[:space:]]*DiscordIdentity[[:space:]]*=[[:space:]]*\"([a-z0-9-]+)\".*/\1/p" pulumi/pkg/config/values.go | head -1); \
+			if [ -z "$$id" ]; then \
+				printf "%b\n" "$(RED)DiscordSecretKeys() calls DiscordAPIKeySecretKey(), but no DiscordIdentity string constant is declared in pulumi/pkg/config/values.go, so that key cannot be resolved and would be silently dropped from this comparison$(NC)"; exit 1; \
+			fi; \
+			printf "api-key-%s\n" "$$id" >> $$d/dpulumi.raw; \
+		fi; \
+		sort -u $$d/dpulumi.raw > $$d/dpulumi; \
+		if [ ! -s $$d/dpulumi ]; then \
+			printf "%b\n" "$(RED)no Secret keys found in DiscordSecretKeys() — this half of the check would pass vacuously$(NC)"; exit 1; \
+		fi; \
+		comm -23 $$d/dscript $$d/dpulumi > $$d/donly; \
+		if [ -s $$d/donly ]; then \
+			printf "%b\n" "$(RED)pulumi/pkg/config/values.go DiscordSecretKeys() is missing keys make-secret.sh emits into accretion-discord-secrets:$(NC)"; \
+			sed "s/^/  /" $$d/donly; exit 1; \
+		fi; \
+		printf "%b\n" "  ok  accretion-discord-secrets: pulumi provisions all $$(wc -l < $$d/dscript | tr -d " ") script Secret keys"; \
+		printf "%b\n" "$(GREEN)pulumi provisions every Secret key make-secret.sh emits$(NC)"'
 
 # #56: .env is gitignored, so no diff, review, or acceptance gate can see a
 # developer's stale bare OPENAI_API_KEY / ANTHROPIC_API_KEY — a runtime warning

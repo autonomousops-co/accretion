@@ -175,6 +175,18 @@ accretion-discord:
     tag: latest
     pullPolicy: IfNotPresent
 
+  secret:
+    # scripts/make-secret.sh provisions accretion-discord-secrets itself (#135).
+    # The chart's OWN Secret is built from plaintext Helm values
+    # (secret.botToken, secret.anthropicApiKey), and until #135 the Tiltfile
+    # supplied exactly those as `--set` flags read out of .env -- so the bot
+    # token and the model keys landed in the Helm release, where
+    # `helm get values accretion-discord` reads them back in cleartext. That is
+    # the rule at the top of this file being broken from outside the file.
+    # deploy/pulumi.yaml has had this shape all along.
+    create: false
+    name: accretion-discord-secrets
+
   api:
     tls:
       # Lockstep with accretion-api's config.api.tls.enabled above. A bot
@@ -200,11 +212,33 @@ accretion-discord:
       ollama:
         base_url: "http://host.docker.internal:11434"
 
-# Deployed from chart defaults, deliberately. Declared so that the set of
-# top-level keys here is exactly the set of charts Tilt deploys from this
-# repository, with no exception for the guard to carve out — a renamed chart
-# then fails by name instead of being the one key nobody checks. cert-manager
-# and metrics-server are absent because they are installed from upstream repos
+  # The model keys, by reference rather than by value (#135) -- the same list
+  # deploy/pulumi.yaml carries, for the same reason. The chart wires these two
+  # env vars itself ONLY when the plaintext is supplied as a VALUE, which is the
+  # one thing that must not happen, so they are declared as ordinary extra
+  # environment variables pointing at the Secret make-secret.sh builds from
+  # .env. A key .env does not set is simply absent from that Secret, and the
+  # kubelet then refuses to start the pod rather than running the bot with an
+  # empty model key.
+  env:
+    - name: ACCRETION_LLM_ANTHROPIC_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: accretion-discord-secrets
+          key: anthropic-api-key
+    - name: ACCRETION_LLM_OPENAI_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: accretion-discord-secrets
+          key: openai-api-key
+
+# The last two charts are declared so that the set of top-level keys here is
+# exactly the set of charts Tilt deploys from this repository, with no exception
+# for the guard to carve out — a renamed chart then fails by name instead of
+# being the one key nobody checks. otel-collector still runs on pure chart
+# defaults and keeps the empty map that expresses that; accretion-db kept one
+# too until #134 gave it the Secret names below. cert-manager and
+# metrics-server are absent because they are installed from upstream repos
 # rather than from charts/.
 # The database password, by reference (#134). This chart shipped `postgres` for
 # both the Postgres superuser and its own schema/partition jobs until then; it

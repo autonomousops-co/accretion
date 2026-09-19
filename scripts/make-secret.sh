@@ -44,8 +44,10 @@
 #                           object, one owner: a Helm-created Secret and a
 #                           kubectl-created one of the same name fight.
 #   accretion-discord-secrets
-#                           the Discord bot's OWN credential for accretion-api,
-#                           under the key its chart's api.secretKey names.
+#                           EVERYTHING the Discord bot reads from a Secret: its
+#                           OWN credential for accretion-api (under the key its
+#                           chart's api.secretKey names) and, since #135, the
+#                           Discord bot token and the two model keys.
 #
 #                           #119: the bot read api-key-accretion-discord out of
 #                           the accretion-api chart's client-keys Secret, which
@@ -60,21 +62,28 @@
 #                           pointed at one shape locally and in a cluster rather
 #                           than two.
 #
-#                           NOT accretion-discord-secret, SINGULAR, which is the
-#                           accretion-discord chart's own Secret. The names
-#                           differ by one letter and hold different things: the
-#                           plural is the bot's credential FOR accretion-api and
-#                           belongs to this script; the singular holds the bot's
-#                           Discord token and model keys and belongs to Helm.
-#                           Pulumi has only the plural because it sets
-#                           secret.create=false and points the chart at its own;
-#                           the Tilt stack still lets the chart create the
-#                           singular from .env values.
+#                           NOT accretion-discord-secret, SINGULAR, which is
+#                           the accretion-discord chart's own Secret. The names
+#                           differ by one letter, and the singular is now the
+#                           one nothing here deploys: it is built from PLAINTEXT
+#                           HELM VALUES (secret.botToken and friends), which is
+#                           how the bot token and the model keys used to reach
+#                           the local stack -- as `--set` flags out of the
+#                           Tiltfile, landing in the Helm release for anyone
+#                           with `helm get values accretion-discord` to read
+#                           back. #135 ended that: both deploy paths set
+#                           secret.create=false and point the chart at the
+#                           plural, which this script owns end to end. The
+#                           chart's own Secret template survives for a bare
+#                           `helm install` that supplies its own values, and no
+#                           path in this repository takes it.
 #
 # Usage:
 #   scripts/make-secret.sh [--namespace NS] [--db-namespace NS] [--env-file PATH]
 #                          [--dry-run]
 #   scripts/make-secret.sh --print-keys        # accretion-api-secrets key names
+#   scripts/make-secret.sh --print-discord-keys
+#                                              # accretion-discord-secrets key names
 #   scripts/make-secret.sh --print-identities  # the apiKeys block .env implies
 #   scripts/make-secret.sh --print-identity-var NAME
 #                                              # the .env variable holding one
@@ -216,6 +225,12 @@ IDENTITIES=(
 MCP_IDENTITY="accretion-mcp"
 DISCORD_IDENTITY="accretion-discord"
 
+DISCORD_MAPPINGS=(
+  "discord-bot-token:DISCORD_BOT_TOKEN"
+  "anthropic-api-key:ACCRETION_LLM_ANTHROPIC_API_KEY"
+  "openai-api-key:ACCRETION_LLM_OPENAI_API_KEY"
+)
+
 # SESSION_KEY is the one required value whose CONTENT, not just its presence,
 # decides whether the pod stays up: the server HMACs session cookies with it and
 # refuses to start on anything weaker than 32 bytes. The accepted form is hex,
@@ -245,6 +260,7 @@ while [ $# -gt 0 ]; do
     -f|--env-file)  ENV_FILE="$2"; shift 2 ;;
     --dry-run)      MODE="print"; shift ;;
     --print-keys)   MODE="keys"; shift ;;
+    --print-discord-keys) MODE="discord-keys"; shift ;;
     --print-identities) MODE="identities"; shift ;;
     --print-identity-var) MODE="identity-var"; IDENTITY_ARG="$2"; shift 2 ;;
     -h|--help)      usage; exit 0 ;;
@@ -254,6 +270,20 @@ done
 
 if [ "$MODE" = "keys" ]; then
   for entry in "${MAPPINGS[@]}"; do printf '%s\n' "${entry%%:*}"; done | sort -u
+  exit 0
+fi
+
+# --print-discord-keys: the key NAMES this script puts in accretion-discord-secrets,
+# and nothing else. No value is read, so like --print-keys it is safe to run in a
+# shell holding real credentials. `make secrets-keys-check` diffs it against the
+# keys the bot's rendered secretKeyRefs actually ask for, and
+# `make secrets-pulumi-check` against the keys Pulumi provisions -- the same two
+# boundaries those gates already police for accretion-api-secrets, which until
+# #135 could not see this Secret at all because the script emitted only one of
+# its keys.
+if [ "$MODE" = "discord-keys" ]; then
+  printf '%s\n' "api-key-${DISCORD_IDENTITY}"
+  for entry in "${DISCORD_MAPPINGS[@]}"; do printf '%s\n' "${entry%%:*}"; done
   exit 0
 fi
 
@@ -660,39 +690,86 @@ else
   echo "      Generate one with: openssl rand -hex 32   then: scripts/make-secret.sh --print-identities" >&2
 fi
 
-# accretion-discord-secrets — the bot's own credential for accretion-api, under
-# the key the accretion-discord chart's api.secretKey names.
+# accretion-discord-secrets — everything the bot reads from a Secret.
 #
-# The key name is DERIVED from the identity rather than written out, because the
-# accretion-api chart builds the same name the same way (api-key-<name> in
-# templates/secret.yaml) and the two must agree. Writing the literal is how a
-# renamed identity would leave a Secret whose key nothing reads.
+# FOUR keys, and until #135 this script owned only the first. The Discord token
+# and the two model keys reached the bot as `--set secret.botToken=...` /
+# `--set secret.anthropicApiKey=...` from the Tiltfile, which put three live
+# credentials into the Helm release where `helm get values accretion-discord`
+# reads them back in cleartext. They come from the same .env this script already
+# reads, and Pulumi has provisioned them under these exact key names all along
+# (pulumi/pkg/config/values.go, DiscordSecretKeys), so this is convergence on
+# the shape that already existed rather than a new mechanism.
 #
-# Skipped, loudly, on the same terms as the MCP Secret above: a fresh clone
-# holds no working credential by design, and a Secret carrying an empty key
-# would authenticate as nobody and 401 with nothing explaining it. The bot's
-# secretKeyRef is not optional, so the pod stays unstarted with the missing
-# Secret named in its events — which is the loud failure, and better than a bot
-# that connects to Discord and then fails every query.
+#   api-key-accretion-discord   the bot's OWN credential for accretion-api. The
+#                               key name is DERIVED from the identity rather
+#                               than written out, because the accretion-api
+#                               chart builds the same name the same way
+#                               (api-key-<name> in templates/secret.yaml) and
+#                               the two must agree. Writing the literal is how a
+#                               renamed identity would leave a Secret whose key
+#                               nothing reads.
+#   discord-bot-token           read by the chart's DISCORD_BOT_TOKEN
+#                               secretKeyRef, which is not optional.
+#   anthropic-api-key           read as ordinary `env:` entries pointed at this
+#   openai-api-key              Secret (deploy/tilt.yaml, deploy/pulumi.yaml).
+#                               The chart's own template wires those two env
+#                               vars ONLY when the plaintext is supplied as a
+#                               VALUE, which is the one thing that must not
+#                               happen, so both callers declare them by
+#                               reference instead.
+#
+# Each key is skipped individually and loudly when .env does not set it, rather
+# than published empty: an empty credential authenticates as nobody, and the
+# symptom is a 401 or a model call rejected with nothing explaining why. The
+# Secret itself is created as long as at least one key resolved.
 discord_var="$(identity_var "$DISCORD_IDENTITY")"
-discord_plaintext=""
-[ -z "$discord_var" ] || discord_plaintext="$(resolve "$discord_var")"
 discord_key="api-key-${DISCORD_IDENTITY}"
 
+
+discord_args=()
+discord_missing=()
+
+discord_plaintext=""
+[ -z "$discord_var" ] || discord_plaintext="$(resolve "$discord_var")"
 if [ -n "$discord_plaintext" ]; then
   (umask 077 && printf '%s' "$discord_plaintext" > "$workdir/$discord_key")
+  discord_args+=("--from-file=${discord_key}=${workdir}/${discord_key}")
+else
+  echo "note: ${discord_key} omitted from ${DISCORD_SECRET_NAME} — ${discord_var:-ACCRETION_API_KEY_DISCORD} is not set in ${ENV_FILE}." >&2
+  echo "      The accretion-discord chart reads that key and its ref is not optional, so the" >&2
+  echo "      bot's pod will not start until it exists." >&2
+  echo "      Generate one with: openssl rand -hex 32   then: scripts/make-secret.sh --print-identities" >&2
+fi
+
+for entry in "${DISCORD_MAPPINGS[@]}"; do
+  key="${entry%%:*}"
+  value="$(resolve "${entry#*:}")"
+  if [ -z "$value" ]; then
+    discord_missing+=("${key} (${entry#*:})")
+    continue
+  fi
+  (umask 077 && printf '%s' "$value" > "$workdir/$key")
+  discord_args+=("--from-file=${key}=${workdir}/${key}")
+done
+
+if [ "${#discord_missing[@]}" -gt 0 ]; then
+  echo "note: ${DISCORD_SECRET_NAME} omits keys ${ENV_FILE} does not set:" >&2
+  printf '        %s\n' "${discord_missing[@]}" >&2
+  echo "      DISCORD_BOT_TOKEN is not optional to the bot's pod; the model keys are only" >&2
+  echo "      needed for the provider the bot is configured to use." >&2
+fi
+
+if [ "${#discord_args[@]}" -gt 0 ]; then
   discord_manifest="$(kubectl create secret generic "$DISCORD_SECRET_NAME" \
     --namespace "$NAMESPACE" \
-    --from-file="${discord_key}=${workdir}/${discord_key}" \
+    "${discord_args[@]}" \
     --dry-run=client -o yaml)"
   manifest="$manifest
 ---
 $discord_manifest"
 else
-  echo "note: ${DISCORD_SECRET_NAME} not created — ${discord_var:-ACCRETION_API_KEY_DISCORD} is not set in ${ENV_FILE}." >&2
-  echo "      The accretion-discord chart reads ${discord_key} from that Secret and its ref is not" >&2
-  echo "      optional, so the bot's pod will not start until it exists." >&2
-  echo "      Generate one with: openssl rand -hex 32   then: scripts/make-secret.sh --print-identities" >&2
+  echo "note: ${DISCORD_SECRET_NAME} not created — ${ENV_FILE} sets none of its four keys." >&2
 fi
 
 if [ "$MODE" = "print" ]; then

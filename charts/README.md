@@ -90,6 +90,16 @@ Cross-namespace wiring: workers and the API reach Postgres at
   a plaintext `key`, which `security.forbidPlaintextAPIKeys` forbids by default, so no deploy path
   produces it. The `accretion-discord` chart's `api.secretName` default still names it; every deploy
   path overrides that to `accretion-discord-secrets` above.
+- **No secret reaches the Discord bot as a Helm value** (#135). `accretion-discord-secrets` carries
+  all four values the bot reads — `api-key-accretion-discord`, `discord-bot-token`,
+  `anthropic-api-key` and `openai-api-key` — and `make-secret.sh` builds every one of them from
+  `.env`, skipping any it does not set. The chart's own `secret.botToken` / `secret.anthropicApiKey`
+  / `secret.openaiApiKey` values still exist for a bare `helm install`, and no path here takes them:
+  both `deploy/tilt.yaml` and `deploy/pulumi.yaml` set `secret.create: false`, name that Secret, and
+  declare the two model-key env vars as `env` entries pointing at it (the chart wires those two
+  itself only when the plaintext is supplied as a value). The Tiltfile passed the token and the
+  Anthropic key as plaintext `--set` flags until #135, which put them in the Helm release where
+  `helm get values accretion-discord` returns them in cleartext.
 - The DB schema is delivered as a ConfigMap + Job; partitioning/retention is tunable under
   `partitionMaintenance` in `accretion-db/values.yaml`.
 - **`accretion-collector`'s database and Redis passwords render into chart-owned Secrets when you

@@ -908,7 +908,7 @@ enabled, but none of it is deployed unless you ask.
 | Off by default | What it is | Turn it on with |
 | --- | --- | --- |
 | Collector controller + Redis | Shards work across scaled collectors | `--set dataCollector.replicaCount=3` (any scale-out) |
-| Discord bot | One of three front ends | `--set enabled=true --set secret.botToken=<token>` |
+| Discord bot | One of three front ends | `--set enabled=true` plus a Secret holding its token ([below](#5-optional-discord-bot)) |
 | Grafana | Dashboards | `--set grafana.enabled=true` (needs a backend below) |
 | Loki | Log storage for Grafana | `--set loki.enabled=true --set-json 'config.service.pipelines.logs.exporters=["debug","otlphttp/loki"]'` |
 | Prometheus | Metric storage for Grafana | `--set prometheus.enabled=true --set-json 'config.service.pipelines.metrics.exporters=["debug","prometheus"]'` |
@@ -987,29 +987,52 @@ token you may not have. `--set enabled=true` is what turns it on.
 > `--set enabled=true`, before upgrading. If it has already happened, `helm rollback accretion-discord`
 > restores the release; the bot token survives in release history.
 
+**Don't pass the bot token to Helm.** `--set secret.botToken=<token>` lands in the Helm release,
+where `helm get values accretion-discord` returns it in cleartext to anyone who can reach it — and
+the same went for the Anthropic and OpenAI keys. That is how the local stack worked until #135, and
+both deploy paths now point the chart at one Secret carrying all four of the values it reads:
+
 ```bash
+kubectl create secret generic accretion-discord-secrets -n accretion \
+  --from-literal=discord-bot-token=<discord-bot-token> \
+  --from-literal=anthropic-api-key=<anthropic-key> \
+  --from-literal=openai-api-key=<openai-key> \
+  --from-literal=api-key-accretion-discord=<the bot's own accretion-api key>
+
 helm upgrade --install accretion-discord ./charts/accretion-discord \
   --namespace accretion \
   --set enabled=true \
   --set image.repository=<registry>/accretion-api \
   --set image.tag=<tag> \
-  --set secret.botToken=<discord-bot-token> \
+  --set secret.create=false \
+  --set secret.name=accretion-discord-secrets \
   --set api.secretName=accretion-discord-secrets \
-  --set api.secretKey=api-key-accretion-discord
+  --set api.secretKey=api-key-accretion-discord \
+  --set-json 'env=[
+    {"name":"ACCRETION_LLM_ANTHROPIC_API_KEY","valueFrom":{"secretKeyRef":{"name":"accretion-discord-secrets","key":"anthropic-api-key"}}},
+    {"name":"ACCRETION_LLM_OPENAI_API_KEY","valueFrom":{"secretKeyRef":{"name":"accretion-discord-secrets","key":"openai-api-key"}}}
+  ]'
 ```
+
+Locally, `scripts/make-secret.sh` builds that Secret from `DISCORD_BOT_TOKEN`,
+`ACCRETION_LLM_ANTHROPIC_API_KEY`, `ACCRETION_LLM_OPENAI_API_KEY` and `ACCRETION_API_KEY_DISCORD` in
+your gitignored `.env`, skipping any the file does not set, so `make up` needs none of this by hand.
+`deploy/pulumi.yaml` and `deploy/tilt.yaml` carry the same shape.
+
+`secret.create=false` is what stops the chart building a Secret of its own out of plaintext values;
+the `env` entries are needed because the chart wires those two model-key env vars itself **only**
+when the plaintext is supplied as a value, which is the one thing that must not happen here.
 
 No database host here, unlike every other chart: the bot holds no database connection. It routes
 every cluster query through `accretion-api`, so there is a single auth-enforced data path. The chart
 declares no `config.database` at all — Helm accepts an unknown value key and ignores it, so a flag
 setting one would have looked like configuration and been none.
 
-The last two lines are there because the bot reads its own key for `accretion-api` from
-`api.secretName` / `api.secretKey`. They still *default* to an entry in `accretion-api`'s
-`accretion-api-client-keys` Secret, which that chart renders only for an identity declaring a
-plaintext key — and every identity is `hash`-only now, so nothing renders it. The values above name
-the Secret `scripts/make-secret.sh` builds from `.env` instead, which is what the Tilt and Pulumi
-paths use too, so the bot is pointed at one shape everywhere. The reference is deliberately **not**
-optional: a wrong or missing Secret fails the pod at rollout instead of 401ing every call.
+`api.secretName` / `api.secretKey` are named because the bot reads its own key for `accretion-api`
+from them, and they still *default* to an entry in `accretion-api`'s `accretion-api-client-keys`
+Secret, which that chart renders only for an identity declaring a plaintext key — and every identity
+is `hash`-only now, so nothing renders it. The reference is deliberately **not** optional: a wrong
+or missing Secret fails the pod at rollout instead of 401ing every call.
 
 **6. Verify:**
 

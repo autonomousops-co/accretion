@@ -157,8 +157,13 @@ TILT_VALUES=deploy/tilt.yaml
 # transcribing it, so the static half of that caller cannot drift at all: the
 # matrix renders the very bytes the Tiltfile passes. What remains transcribed is
 # only what the Tiltfile computes -- the identities, the monitored namespace list
-# and the three .env-sourced Discord values -- and that is what drift_check
-# compares. accretion-db and otel-collector take chart defaults, expressed in
+# and, since #135, a single .env-sourced Discord value. It was three until then:
+# the bot token and the Anthropic key were `--set` flags carrying live
+# credentials into the Helm release, and they now arrive through a Secret named
+# in the central file, so they are not transcribed here because the Tiltfile no
+# longer passes them. discord.guildID stays a flag -- an ID, not a credential,
+# and per-developer, so it has no place in a checked-in file either. That
+# remainder is what drift_check compares. accretion-db and otel-collector take chart defaults, expressed in
 # the central file as explicit empty maps, so their rows still name the subtree:
 # the day one of them gains a setting, the row already covers it.
 #
@@ -182,7 +187,7 @@ make-deploy-scaled|accretion-collector|-|1|$DB_PASSWORD_STUB --set dataCollector
 tilt|accretion-api|Tiltfile|1|@subtree-from:$TILT_VALUES:accretion-api $IDENTITY_STUB
 tilt|accretion-collector|Tiltfile|1|@subtree-from:$TILT_VALUES:accretion-collector --set config.k8s.namespaces={default,accretion-db}
 tilt|accretion-db|Tiltfile|1|@subtree-from:$TILT_VALUES:accretion-db
-tilt|accretion-discord|Tiltfile|1|@subtree-from:$TILT_VALUES:accretion-discord --set secret.botToken=$PLACEHOLDER --set secret.anthropicApiKey=$PLACEHOLDER --set discord.guildID=$PLACEHOLDER
+tilt|accretion-discord|Tiltfile|1|@subtree-from:$TILT_VALUES:accretion-discord --set discord.guildID=$PLACEHOLDER
 tilt|otel-collector|Tiltfile|1|@subtree-from:$TILT_VALUES:otel-collector
 EOF
 }

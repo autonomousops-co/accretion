@@ -26,7 +26,10 @@ def read_env():
 
 env_vars = read_env()
 
-anthropic_api_key = os.getenv("ACCRETION_LLM_ANTHROPIC_API_KEY") or env_vars.get("ACCRETION_LLM_ANTHROPIC_API_KEY", "")
+# ACCRETION_LLM_ANTHROPIC_API_KEY is deliberately NOT read here any more (#135).
+# It was read only to be handed to Helm as `--set secret.anthropicApiKey=`;
+# scripts/make-secret.sh reads it into accretion-discord-secrets instead, and a
+# value this file does not hold is a value it cannot leak into a release.
 discord_bot_token = os.getenv("DISCORD_BOT_TOKEN") or env_vars.get("DISCORD_BOT_TOKEN", "")
 discord_guild_id = os.getenv("DISCORD_GUILD_ID") or env_vars.get("DISCORD_GUILD_ID", "")
 
@@ -393,12 +396,26 @@ helm_resource(
 # the bot cannot connect, so deploying it would only add a CrashLoopBackOff to
 # `tilt up`.
 #
-# The bot's credential FOR accretion-api is a second, separate key, and since
-# #119 it comes from the accretion-discord-secrets Secret sync-secrets creates
-# (api.secretName/secretKey in deploy/tilt.yaml). It used to come from the
-# accretion-api chart's client-keys Secret, which that chart emits only for a
-# PLAINTEXT identity -- so it stopped existing when #122 made every identity
-# hash-only, and the bot's pod could not start at all.
+# NO SECRET VALUE IS PASSED TO HELM (#135). The bot token and the model keys
+# reached the chart as `--set secret.botToken=...` / `--set
+# secret.anthropicApiKey=...` until then, read straight out of .env -- which put
+# three live credentials into the Helm release, where anyone who can reach it
+# gets them back in cleartext from `helm get values accretion-discord`. All
+# three now come from the accretion-discord-secrets Secret sync-secrets builds,
+# wired in deploy/tilt.yaml as secret.create=false plus explicit env entries,
+# which is the shape deploy/pulumi.yaml has always used. Only discord.guildID
+# is still a flag: it is an ID, not a credential, and it is per-developer, so it
+# has no place in a checked-in file either.
+#
+# Reading DISCORD_BOT_TOKEN here is still a read of .env, but only to DECIDE --
+# with no token the bot could only CrashLoopBackOff, so the release is skipped
+# entirely. The value itself goes no further than this `if`.
+#
+# The bot's credential FOR accretion-api is a fourth key in the same Secret, and
+# since #119 it comes from there rather than from the accretion-api chart's
+# client-keys Secret -- that chart emits that one only for a PLAINTEXT identity,
+# so it stopped existing when #122 made every identity hash-only, and the bot's
+# pod could not start at all.
 if discord_bot_token:
     helm_resource(
         'accretion-discord',
@@ -411,10 +428,7 @@ if discord_bot_token:
             # bot has no database connection, every cluster query goes through
             # accretion-api, and that chart declares no config.database at all.
             '--values', chart_values['accretion-discord'],
-            '--set', 'secret.botToken=' + discord_bot_token,
         ] + ([
-            '--set', 'secret.anthropicApiKey=' + anthropic_api_key,
-        ] if anthropic_api_key else []) + ([
             '--set', 'discord.guildID=' + discord_guild_id,
         ] if discord_guild_id else []),
         image_deps=['accretion-api'],
