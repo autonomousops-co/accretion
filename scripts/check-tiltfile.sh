@@ -216,8 +216,15 @@ selfcheck() {
 
   # 2. A chart with no key at all: the same defect from the other side, and the
   #    reason the guard compares both directions rather than a count.
-  awk '$0 != "accretion-db: {}"' "$CENTRAL_VALUES" > "$FIXTURE_DIR/missing.yaml"
-  fixture_differs "missing-key" "$FIXTURE_DIR/missing.yaml" "no \`accretion-db: {}\` line was removed" &&
+  #    Removes the KEY AND ITS BODY, rather than matching the literal line
+  #    `accretion-db: {}`. That literal stopped existing the moment #134 gave
+  #    the release a setting, and the fixture then came out byte-identical to
+  #    the real file -- the case tested nothing, which fixture_differs is here
+  #    to catch and did. Deleting the key and every indented line under it
+  #    works whether the subtree is `{}` or a page of values.
+  awk '/^accretion-db:/ { skip = 1; next } skip && /^[^[:space:]#]/ { skip = 0 } skip { next } { print }' \
+    "$CENTRAL_VALUES" > "$FIXTURE_DIR/missing.yaml"
+  fixture_differs "missing-key" "$FIXTURE_DIR/missing.yaml" "no \`accretion-db:\` key was removed" &&
     must_fail_naming "missing-key" "accretion-db" --tilt_values="$FIXTURE_DIR/missing.yaml" || true
 
   # 3. THE OBJECT-CORRESPONDENCE CASE. Scaling a collector brings back the

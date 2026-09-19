@@ -52,7 +52,14 @@ config:
     host: "accretion-db-postgresql.accretion-db.svc.cluster.local"
     port: 5432
     user: "postgres"
-    password: "postgres"
+    # No password here (#134). It read "postgres" until then, which is a working
+    # credential checked into a public repository. The password arrives through
+    # the Secret scripts/make-secret.sh builds from ACCRETION_DATABASE_PASSWORD
+    # in your gitignored .env — the same Secret name and key deploy/pulumi.yaml
+    # points this chart at, so dev and a cluster are pointed at one shape rather
+    # than two. With existingSecret set the chart creates no Secret of its own
+    # and never sees config.database.password at all.
+    existingSecret: "accretion-api-secrets"
     database: "accretion"
     sslmode: "disable"
 
@@ -111,11 +118,17 @@ apiKeys: []
 # It used to be a chart-owned Secret carrying accretion-mcp's plaintext, which
 # is what made it structurally incompatible with the plaintext guard (#122).
 
+# NOT a database (#134 review). This chart declares no `dependencies:` — there
+# is no charts/ directory and no Chart.lock — so nothing here deploys
+# PostgreSQL; the database is the accretion-db release, which owns its own
+# superuser password and guards it in its own templates/_validation.tpl.
+#
+# What is left is read by exactly one template, pvc-creation-hook.yaml, which
+# pre-creates a PVC named for a StatefulSet this chart does not create either.
+# That is a separate pre-existing defect; these keys stay until it is addressed
+# so the rendered objects do not change here.
 postgresql:
   enabled: true
-  auth:
-    postgresPassword: "postgres"
-    database: "accretion"
   primary:
     persistence:
       size: 8Gi

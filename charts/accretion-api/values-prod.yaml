@@ -65,11 +65,13 @@ config:
     user: "postgres"
     # SECURITY: never hardcode the prod database password in this file.
     # Supply it at deploy time via one of:
-    #   helm ... --set-string config.database.password=$ACCRETION_DB_PASSWORD
-    #   or mount an existingSecret and reference it.
-    # The chart guard (templates/_validation.tpl, enabled by
-    # security.enforceStrongDbPassword below) refuses to render when this is
-    # empty or the insecure default "postgres".
+    #   helm ... --set-string config.database.password="$ACCRETION_DATABASE_PASSWORD"
+    #   or mount an existingSecret and reference it (deploy/pulumi.yaml does:
+    #   existingSecret: accretion-api-secrets, key db-password).
+    # The chart guard (templates/_validation.tpl) refuses to render when this is
+    # empty or the insecure default "postgres" and no existingSecret is set.
+    # That guard is unconditional since #134 -- prod used to be the only
+    # environment that turned it on.
     password: ""
     database: "accretion"
     # verify-full authenticates the server against a trusted CA (protects against
@@ -96,25 +98,22 @@ config:
 # the ones that call /api/chat.
 apiKeys: []
 
-# Enforce a strong, operator-supplied database password in prod. When true, the
-# chart guard in templates/_validation.tpl fails the render if the password is
-# empty or the insecure default "postgres". Only prod sets this; dev/staging
-# leave it unset so their local defaults still template.
 security:
-  enforceStrongDbPassword: true
   # Reject any apiKeys entry carrying a plaintext `key`: prod identities are
   # hash-only so the plaintext never enters the Helm release.
   forbidPlaintextAPIKeys: true
 
+# NOT a database (#134 review). This chart declares no `dependencies:` — there
+# is no charts/ directory and no Chart.lock — so nothing here deploys
+# PostgreSQL; the database is the accretion-db release, which owns its own
+# superuser password and guards it in its own templates/_validation.tpl.
+#
+# What is left is read by exactly one template, pvc-creation-hook.yaml, which
+# pre-creates a PVC named for a StatefulSet this chart does not create either.
+# That is a separate pre-existing defect; these keys stay until it is addressed
+# so the rendered objects do not change here.
 postgresql:
   enabled: true
-  auth:
-    # SECURITY: do not hardcode the postgres superuser password. Provide it via
-    # an existingSecret, or --set-string postgresql.auth.postgresPassword=... at
-    # deploy time. Left empty so the chart guard rejects the insecure default.
-    existingSecret: ""  # e.g. "accretion-db-credentials"
-    postgresPassword: ""
-    database: "accretion"
   primary:
     persistence:
       size: 50Gi

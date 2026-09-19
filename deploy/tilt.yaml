@@ -105,6 +105,13 @@ accretion-api:
       # Tiltfile spelled it out in the flag; it is not derived from the
       # Tiltfile's db_namespace, and the two must be changed together.
       host: accretion-db-postgresql.accretion-db.svc.cluster.local
+      # A NAME, not a value, which is why it belongs in this file (#134). The
+      # chart carried `postgres` as its own default until then; it now carries
+      # none and refuses to render without one. sync-secrets builds this Secret
+      # out of ACCRETION_DATABASE_PASSWORD in .env, under the db-password key
+      # the chart reads -- the same Secret name deploy/pulumi.yaml points this
+      # chart at, so local and cluster are one shape rather than two.
+      existingSecret: accretion-api-secrets
 
   # No in-cluster Ollama: it would pull a multi-gigabyte model image into a kind
   # node to duplicate a server the developer is already running.
@@ -145,6 +152,14 @@ accretion-collector:
   config:
     database:
       host: accretion-db-postgresql.accretion-db.svc.cluster.local
+      # Same Secret as the accretion-api release above, same reason (#134). The
+      # KEY has to be named explicitly: this chart's own existingSecretKey
+      # default is "password", and the Secret sync-secrets builds names it
+      # db-password, so leaving it to the default would point every collector at
+      # a key that is not there. deploy/pulumi.yaml states both for the same
+      # reason.
+      existingSecret: accretion-api-secrets
+      existingSecretKey: db-password
     llm:
       ollama:
         base_url: "http://host.docker.internal:11434"
@@ -159,6 +174,18 @@ accretion-discord:
   image:
     tag: latest
     pullPolicy: IfNotPresent
+
+  secret:
+    # scripts/make-secret.sh provisions accretion-discord-secrets itself (#135).
+    # The chart's OWN Secret is built from plaintext Helm values
+    # (secret.botToken, secret.anthropicApiKey), and until #135 the Tiltfile
+    # supplied exactly those as `--set` flags read out of .env -- so the bot
+    # token and the model keys landed in the Helm release, where
+    # `helm get values accretion-discord` reads them back in cleartext. That is
+    # the rule at the top of this file being broken from outside the file.
+    # deploy/pulumi.yaml has had this shape all along.
+    create: false
+    name: accretion-discord-secrets
 
   api:
     tls:
@@ -185,11 +212,53 @@ accretion-discord:
       ollama:
         base_url: "http://host.docker.internal:11434"
 
-# Deployed from chart defaults, deliberately. Declared so that the set of
-# top-level keys here is exactly the set of charts Tilt deploys from this
-# repository, with no exception for the guard to carve out — a renamed chart
-# then fails by name instead of being the one key nobody checks. cert-manager
-# and metrics-server are absent because they are installed from upstream repos
+  # The model keys, by reference rather than by value (#135) -- the same list
+  # deploy/pulumi.yaml carries, for the same reason. The chart wires these two
+  # env vars itself ONLY when the plaintext is supplied as a VALUE, which is the
+  # one thing that must not happen, so they are declared as ordinary extra
+  # environment variables pointing at the Secret make-secret.sh builds from
+  # .env. A key .env does not set is simply absent from that Secret, and the
+  # kubelet then refuses to start the pod rather than running the bot with an
+  # empty model key.
+  env:
+    - name: ACCRETION_LLM_ANTHROPIC_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: accretion-discord-secrets
+          key: anthropic-api-key
+    - name: ACCRETION_LLM_OPENAI_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: accretion-discord-secrets
+          key: openai-api-key
+
+# The last two charts are declared so that the set of top-level keys here is
+# exactly the set of charts Tilt deploys from this repository, with no exception
+# for the guard to carve out — a renamed chart then fails by name instead of
+# being the one key nobody checks. otel-collector still runs on pure chart
+# defaults and keeps the empty map that expresses that; accretion-db kept one
+# too until #134 gave it the Secret names below. cert-manager and
+# metrics-server are absent because they are installed from upstream repos
 # rather than from charts/.
-accretion-db: {}
+# The database password, by reference (#134). This chart shipped `postgres` for
+# both the Postgres superuser and its own schema/partition jobs until then; it
+# now carries neither and refuses to render with no Secret named -- which is the
+# guard that stands between it and the Bitnami subchart's habit of GENERATING a
+# random password that none of the clients hold.
+#
+# sync-secrets publishes accretion-db-secrets into the accretion-db namespace
+# (a Secret does not cross one, so the same password is published there as well
+# as into accretion-core) carrying BOTH keys named below: postgres-password for
+# the subchart, db-password for this chart's own jobs.
+accretion-db:
+  postgresql:
+    auth:
+      # The key name is left to the subchart's auth.secretKeys.adminPasswordKey
+      # default, postgres-password, which is what make-secret.sh writes.
+      existingSecret: accretion-db-secrets
+  config:
+    database:
+      existingSecret: accretion-db-secrets
+      existingSecretKey: db-password
+
 otel-collector: {}

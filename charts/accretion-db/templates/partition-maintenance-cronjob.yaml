@@ -243,8 +243,16 @@ spec:
                   value: {{ .Values.config.database.port | quote }}
                 - name: PGUSER
                   value: {{ .Values.config.database.user | quote }}
+                # From a Secret, never a literal (#134) -- same change, same
+                # reason as templates/schema-job.yaml. This one is worse in one
+                # respect: a CronJob's pod template is re-read on every
+                # schedule, so the plaintext sat in a manifest that stays in the
+                # cluster indefinitely rather than for one Job's lifetime.
                 - name: PGPASSWORD
-                  value: {{ .Values.config.database.password | quote }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "accretion-db.dbSecretName" . }}
+                      key: {{ include "accretion-db.dbSecretKey" . }}
                 - name: PGDATABASE
                   value: {{ .Values.config.database.database | quote }}
                 - name: AHEAD_WEEKS

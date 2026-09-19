@@ -52,7 +52,16 @@ config:
     host: "accretion-db-postgresql.accretion-db.svc.cluster.local"
     port: 5432
     user: "postgres"
-    password: "postgres"
+    # SECURITY: never hardcode the staging database password in this file. It
+    # read "postgres" until #134, which the old opt-in guard let through because
+    # only values-prod.yaml turned that guard on — staging shipped the insecure
+    # default by design. Staging is now shaped like prod: supply it at deploy
+    # time with
+    #   helm ... --set-string config.database.password="$ACCRETION_DATABASE_PASSWORD"
+    # or, better, point config.database.existingSecret at a Secret carrying a
+    # db-password key so the value never enters the Helm release at all. The
+    # chart guard (templates/_validation.tpl) refuses to render with neither.
+    password: ""
     database: "accretion"
     sslmode: "require"
 
@@ -78,11 +87,17 @@ apiKeys: []
 security:
   forbidPlaintextAPIKeys: true
 
+# NOT a database (#134 review). This chart declares no `dependencies:` — there
+# is no charts/ directory and no Chart.lock — so nothing here deploys
+# PostgreSQL; the database is the accretion-db release, which owns its own
+# superuser password and guards it in its own templates/_validation.tpl.
+#
+# What is left is read by exactly one template, pvc-creation-hook.yaml, which
+# pre-creates a PVC named for a StatefulSet this chart does not create either.
+# That is a separate pre-existing defect; these keys stay until it is addressed
+# so the rendered objects do not change here.
 postgresql:
   enabled: true
-  auth:
-    postgresPassword: "postgres"
-    database: "accretion"
   primary:
     persistence:
       size: 20Gi

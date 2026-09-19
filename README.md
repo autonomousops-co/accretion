@@ -749,15 +749,36 @@ that is the SHA-256 `hash` in the chart's `apiKeys` values list, and
 subchart, so resolve dependencies first; a post-install Job applies `unified_entries` and its
 indexes:
 
+The chart carries **no password of its own**. It shipped `postgres` for both the superuser and its
+own schema Job until #134 — a working credential in a public repository — and now refuses to render
+with neither a password nor a Secret named. Create the Secret first; both keys hold the same value,
+because two readers name it differently (`postgres-password` is what the Bitnami subchart's
+`auth.secretKeys.adminPasswordKey` reads, `db-password` is what the schema Job and the partition
+CronJob read through `secretKeyRef`):
+
 ```bash
+kubectl create namespace accretion-db
+kubectl create secret generic accretion-db-secrets -n accretion-db \
+  --from-literal=postgres-password=<db-password> \
+  --from-literal=db-password=<db-password>
+
 helm dependency build ./charts/accretion-db
 helm upgrade --install accretion-db ./charts/accretion-db \
   --namespace accretion-db \
-  --set-string postgresql.auth.postgresPassword=<db-password> \
+  --set postgresql.auth.existingSecret=accretion-db-secrets \
+  --set config.database.existingSecret=accretion-db-secrets \
   --wait
 
 kubectl wait --for=condition=complete job/accretion-db-schema -n accretion-db --timeout=300s
 ```
+
+Locally, `scripts/make-secret.sh` builds exactly that Secret from `ACCRETION_DATABASE_PASSWORD` in
+your gitignored `.env`, so `make up` needs none of this by hand.
+
+`--set-string postgresql.auth.postgresPassword=<db-password> --set-string
+config.database.password=<db-password>` also renders, and is the shortcut the chart still accepts;
+it puts the value in your shell history and in the Helm release, where `helm get values` returns it
+in cleartext. Prefer the Secret.
 
 **3. Collectors** (three pods by default):
 
@@ -808,12 +829,14 @@ Two consequences are worth naming, because Helm reports neither:
   [`deploy/pulumi.yaml`](deploy/pulumi.yaml) is the worked example: it is what the Pulumi path
   layers on this chart, and its `accretion-collector` subtree is a good starting shape.
 
-**For production, don't pass the database or Redis password to Helm at all.** Even
-`--set-string config.database.password=<value>` above puts the value in shell history and in the
-Helm release Secret, where `helm get values` returns it in cleartext (the same shape
-`charts/DKJR.md` warns about for a different key). Create the Secret out of band instead — a plain
-`kubectl create secret generic`, External Secrets Operator, Vault, or SOPS — and point the chart at
-it by name:
+**Don't pass the database or Redis password to Helm at all — and since #134 the database one is no
+longer optional to think about.** The chart carried `postgres` as its own default until then and now
+carries nothing, so a render with neither a password nor an `existingSecret` fails and names both.
+`--set-string config.database.password=<value>` above satisfies it, and is what the local stack is
+deliberately moving away from: it puts the value in shell history and in the Helm release Secret,
+where `helm get values` returns it in cleartext (the same shape `charts/DKJR.md` warns about for a
+different key). Create the Secret out of band instead — a plain `kubectl create secret generic`,
+External Secrets Operator, Vault, or SOPS — and point the chart at it by name:
 
 ```bash
 kubectl create secret generic accretion-db-creds -n accretion \
@@ -846,8 +869,9 @@ clients and the server authenticate with different passwords; a Secret with only
 fine and fails at rollout, on the Redis pod's volume mount. See the `existingSecret` /
 `existingSecretKey` / `existingSecretPasswordKey` / `existingSecretConfKey` comments in
 `charts/accretion-collector/values.yaml` for the full tradeoff — including which validation moves
-to the operator once the chart stops seeing the value. Leave both `existingSecret` values unset to
-keep the chart managing its own Secrets from `config.database.password` / `redis.auth.password`.
+to the operator once the chart stops seeing the value. Leaving both `existingSecret` values unset
+keeps the chart managing its own Secrets from `config.database.password` / `redis.auth.password` —
+but neither has a default any more, so that path means supplying both values, not inheriting them.
 
 **No controller and no Redis are deployed here.** They shard work across horizontally scaled
 collectors, and a default install runs one replica of each with no HPA — so the dispatcher runs
@@ -884,7 +908,7 @@ enabled, but none of it is deployed unless you ask.
 | Off by default | What it is | Turn it on with |
 | --- | --- | --- |
 | Collector controller + Redis | Shards work across scaled collectors | `--set dataCollector.replicaCount=3` (any scale-out) |
-| Discord bot | One of three front ends | `--set enabled=true --set secret.botToken=<token>` |
+| Discord bot | One of three front ends | `--set enabled=true` plus a Secret holding its token ([below](#5-optional-discord-bot)) |
 | Grafana | Dashboards | `--set grafana.enabled=true` (needs a backend below) |
 | Loki | Log storage for Grafana | `--set loki.enabled=true --set-json 'config.service.pipelines.logs.exporters=["debug","otlphttp/loki"]'` |
 | Prometheus | Metric storage for Grafana | `--set prometheus.enabled=true --set-json 'config.service.pipelines.metrics.exporters=["debug","prometheus"]'` |
@@ -946,8 +970,12 @@ helm upgrade --install accretion-api ./charts/accretion-api \
 (see [API keys](#api-keys) for how to produce each `<digest>`). Prod entries carry `hash` only, so
 no plaintext enters the Helm release — distribute each client's key out-of-band.
 
-For production, put the DB password in an operator-managed Secret with a `db-password` key and pass
-`--set config.database.existingSecret=<name>` instead of `config.database.password`.
+The DB password has no chart default (#134): the render above fails without either
+`--set-string config.database.password=<db-password>`, as shown, or a Secret. Prefer the Secret —
+put the password in an operator-managed one under a `db-password` key and pass
+`--set config.database.existingSecret=<name>` instead, which keeps the value out of your shell
+history and out of `helm get values`. `deploy/pulumi.yaml` points this chart at
+`accretion-api-secrets`, and `scripts/make-secret.sh` builds the same Secret locally.
 
 **5. (Optional) Discord bot.** Off by default: the MCP is the primary front end, and the bot needs a
 token you may not have. `--set enabled=true` is what turns it on.
@@ -959,29 +987,52 @@ token you may not have. `--set enabled=true` is what turns it on.
 > `--set enabled=true`, before upgrading. If it has already happened, `helm rollback accretion-discord`
 > restores the release; the bot token survives in release history.
 
+**Don't pass the bot token to Helm.** `--set secret.botToken=<token>` lands in the Helm release,
+where `helm get values accretion-discord` returns it in cleartext to anyone who can reach it — and
+the same went for the Anthropic and OpenAI keys. That is how the local stack worked until #135, and
+both deploy paths now point the chart at one Secret carrying all four of the values it reads:
+
 ```bash
+kubectl create secret generic accretion-discord-secrets -n accretion \
+  --from-literal=discord-bot-token=<discord-bot-token> \
+  --from-literal=anthropic-api-key=<anthropic-key> \
+  --from-literal=openai-api-key=<openai-key> \
+  --from-literal=api-key-accretion-discord=<the bot's own accretion-api key>
+
 helm upgrade --install accretion-discord ./charts/accretion-discord \
   --namespace accretion \
   --set enabled=true \
   --set image.repository=<registry>/accretion-api \
   --set image.tag=<tag> \
-  --set secret.botToken=<discord-bot-token> \
+  --set secret.create=false \
+  --set secret.name=accretion-discord-secrets \
   --set api.secretName=accretion-discord-secrets \
-  --set api.secretKey=api-key-accretion-discord
+  --set api.secretKey=api-key-accretion-discord \
+  --set-json 'env=[
+    {"name":"ACCRETION_LLM_ANTHROPIC_API_KEY","valueFrom":{"secretKeyRef":{"name":"accretion-discord-secrets","key":"anthropic-api-key"}}},
+    {"name":"ACCRETION_LLM_OPENAI_API_KEY","valueFrom":{"secretKeyRef":{"name":"accretion-discord-secrets","key":"openai-api-key"}}}
+  ]'
 ```
+
+Locally, `scripts/make-secret.sh` builds that Secret from `DISCORD_BOT_TOKEN`,
+`ACCRETION_LLM_ANTHROPIC_API_KEY`, `ACCRETION_LLM_OPENAI_API_KEY` and `ACCRETION_API_KEY_DISCORD` in
+your gitignored `.env`, skipping any the file does not set, so `make up` needs none of this by hand.
+`deploy/pulumi.yaml` and `deploy/tilt.yaml` carry the same shape.
+
+`secret.create=false` is what stops the chart building a Secret of its own out of plaintext values;
+the `env` entries are needed because the chart wires those two model-key env vars itself **only**
+when the plaintext is supplied as a value, which is the one thing that must not happen here.
 
 No database host here, unlike every other chart: the bot holds no database connection. It routes
 every cluster query through `accretion-api`, so there is a single auth-enforced data path. The chart
 declares no `config.database` at all — Helm accepts an unknown value key and ignores it, so a flag
 setting one would have looked like configuration and been none.
 
-The last two lines are there because the bot reads its own key for `accretion-api` from
-`api.secretName` / `api.secretKey`. They still *default* to an entry in `accretion-api`'s
-`accretion-api-client-keys` Secret, which that chart renders only for an identity declaring a
-plaintext key — and every identity is `hash`-only now, so nothing renders it. The values above name
-the Secret `scripts/make-secret.sh` builds from `.env` instead, which is what the Tilt and Pulumi
-paths use too, so the bot is pointed at one shape everywhere. The reference is deliberately **not**
-optional: a wrong or missing Secret fails the pod at rollout instead of 401ing every call.
+`api.secretName` / `api.secretKey` are named because the bot reads its own key for `accretion-api`
+from them, and they still *default* to an entry in `accretion-api`'s `accretion-api-client-keys`
+Secret, which that chart renders only for an identity declaring a plaintext key — and every identity
+is `hash`-only now, so nothing renders it. The reference is deliberately **not** optional: a wrong
+or missing Secret fails the pod at rollout instead of 401ing every call.
 
 **6. Verify:**
 

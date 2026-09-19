@@ -217,12 +217,22 @@ config:
     host: "accretion-db-postgresql.accretion-db.svc.cluster.local"
     port: 5432
     user: "postgres"
-    # Source for the chart-created db-password Secret (templates/secret.yaml).
-    # DEV ONLY: prod must not hardcode this — supply the password out-of-band via
-    # existingSecret (below) or --set-string config.database.password=... The
-    # ACCRETION_DATABASE_PASSWORD env var (secretKeyRef) injects it at runtime;
-    # it is no longer written into the ConfigMap.
-    password: "postgres"
+    # SECURITY: never hardcode a database password in this file. It shipped
+    # "postgres" until #134, so a default `helm install` stood up a database
+    # whose password was public knowledge. Empty, and the guard in
+    # templates/_validation.tpl refuses to render rather than falling back to a
+    # working default or generating one. Two ways to supply it:
+    #
+    #   existingSecret (below) — the shape every deploy path uses. Locally,
+    #     scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD from your
+    #     gitignored .env into accretion-api-secrets under db-password.
+    #   --set-string config.database.password=$ACCRETION_DATABASE_PASSWORD —
+    #     the value then enters the Helm release, so prefer existingSecret.
+    #
+    # Source for the chart-created db-password Secret (templates/secret.yaml)
+    # when existingSecret is empty. The ACCRETION_DATABASE_PASSWORD env var
+    # (secretKeyRef) injects it at runtime; it is not written into the ConfigMap.
+    password: ""
     # When set, the chart does NOT create its own db-password Secret and both the
     # main container (ACCRETION_DATABASE_PASSWORD) and the wait-for-postgres
     # initContainer (PGPASSWORD) reference this operator-provisioned secret
@@ -384,17 +394,16 @@ serviceAccount:
   annotations: {}
   name: ""
 
-# Chart-level security guards (templates/_validation.tpl). No single posture
-# here: enforceStrongDbPassword is opt-in (false below, so dev/staging keep
-# templating with their local defaults; only values-prod.yaml sets it true).
-# forbidPlaintextAPIKeys is the opposite shape — on by default below, with
-# dev opting explicitly out. Read each flag's own comment, not this heading,
-# for what a bare `helm install` actually gets.
+# Chart-level security guards (templates/_validation.tpl).
+#
+# security.enforceStrongDbPassword is GONE (#134). It was an opt-in switch over
+# a guard that only values-prod.yaml turned on, which is to say dev and staging
+# rendered with the insecure checked-in default BY DESIGN. The default is now
+# fail-closed for every environment, so the flag has nothing left to select: a
+# missing database password is refused wherever it happens. Setting the key does
+# nothing — helm ignores unknown value keys — so a values file that still
+# carries it is not weakened, merely out of date.
 security:
-  # Refuse to render when config.database.password is empty or "postgres".
-  # Opt-in: false here, so only values-prod.yaml (which sets it true) pays for
-  # it. Staging does not set this — it inherits false, same as dev.
-  enforceStrongDbPassword: false
   # Refuse to render any apiKeys entry carrying a plaintext `key`, so the
   # plaintext never enters the Helm release. On by default: a new environment
   # file, or a `helm install` with no values file at all, should get the safe

@@ -76,6 +76,25 @@ IDENTITY_STUB='--set-json apiKeys=[{"name":"ci","hash":"'"$ZERO_DIGEST"'","permi
 # resolve to on a particular stack.
 PLACEHOLDER=values-matrix-placeholder
 
+# The chart-defaults rows' database password, and the same kind of thing as
+# IDENTITY_STUB above rather than a value under test (#134). accretion-api,
+# accretion-collector and accretion-db all refuse to render with no password and
+# no existingSecret -- a deliberate fail-closed default, like the empty-`apiKeys`
+# one IDENTITY_STUB exists for -- so a row meaning "chart defaults and nothing
+# else" still has to supply one or it fails for a reason that has nothing to do
+# with the caller under test.
+#
+# Only the rows that render CHART DEFAULTS carry it. Every real caller below
+# names a Secret instead, which is the shape #134 moved them to: the tilt rows
+# get config.database.existingSecret out of deploy/tilt.yaml, the
+# make-deploy-staging/prod rows pass the deploy-time password their values files
+# document, and the dev and example files name accretion-api-secrets themselves.
+# Adding it to a tilt row would ALSO break drift_check, correctly: the Tiltfile
+# passes no such flag, and a matrix row that does is a row no longer describing
+# its caller.
+DB_PASSWORD_STUB='--set-string config.database.password=render-only-not-a-credential'
+PG_PASSWORD_STUB='--set-string postgresql.auth.postgresPassword=render-only-not-a-credential'
+
 # The Tiltfile's central values file (#119). Every static setting Tilt used to
 # pass as an inline --set flag lives there, nested by chart name, and the
 # Tiltfile materialises each chart's subtree at load.
@@ -138,8 +157,13 @@ TILT_VALUES=deploy/tilt.yaml
 # transcribing it, so the static half of that caller cannot drift at all: the
 # matrix renders the very bytes the Tiltfile passes. What remains transcribed is
 # only what the Tiltfile computes -- the identities, the monitored namespace list
-# and the three .env-sourced Discord values -- and that is what drift_check
-# compares. accretion-db and otel-collector take chart defaults, expressed in
+# and, since #135, a single .env-sourced Discord value. It was three until then:
+# the bot token and the Anthropic key were `--set` flags carrying live
+# credentials into the Helm release, and they now arrive through a Secret named
+# in the central file, so they are not transcribed here because the Tiltfile no
+# longer passes them. discord.guildID stays a flag -- an ID, not a credential,
+# and per-developer, so it has no place in a checked-in file either. That
+# remainder is what drift_check compares. accretion-db and otel-collector take chart defaults, expressed in
 # the central file as explicit empty maps, so their rows still name the subtree:
 # the day one of them gains a setting, the row already covers it.
 #
@@ -149,21 +173,21 @@ TILT_VALUES=deploy/tilt.yaml
 # ---------------------------------------------------------------------------
 matrix_rows() {
   cat <<EOF
-default|accretion-api|-|1|$IDENTITY_STUB
+default|accretion-api|-|1|$IDENTITY_STUB $DB_PASSWORD_STUB
 example|accretion-api|-|1|-f charts/accretion-api/values-example.yaml
-default|accretion-collector|-|1|
-default|accretion-db|-|1|
+default|accretion-collector|-|1|$DB_PASSWORD_STUB
+default|accretion-db|-|1|$DB_PASSWORD_STUB $PG_PASSWORD_STUB
 default|accretion-discord|-|0|
 default|otel-collector|-|1|
 make-deploy-dev|accretion-api|-|1|-f charts/accretion-api/values-dev.yaml $IDENTITY_STUB
-make-deploy-staging|accretion-api|-|1|-f charts/accretion-api/values-staging.yaml $IDENTITY_STUB --set-string config.database.password=$PLACEHOLDER --set-string postgresql.auth.postgresPassword=$PLACEHOLDER
-make-deploy-prod|accretion-api|-|1|-f charts/accretion-api/values-prod.yaml $IDENTITY_STUB --set-string config.database.password=$PLACEHOLDER --set-string postgresql.auth.postgresPassword=$PLACEHOLDER
-make-deploy|accretion-collector|-|1|
-make-deploy-scaled|accretion-collector|-|1|--set dataCollector.replicaCount=2 --set dataCollector.kinds.log.split=true --set dataCollector.kinds.metric.split=true --set-string redis.auth.password=render-only-not-a-credential
+make-deploy-staging|accretion-api|-|1|-f charts/accretion-api/values-staging.yaml $IDENTITY_STUB --set-string config.database.password=$PLACEHOLDER
+make-deploy-prod|accretion-api|-|1|-f charts/accretion-api/values-prod.yaml $IDENTITY_STUB --set-string config.database.password=$PLACEHOLDER
+make-deploy|accretion-collector|-|1|$DB_PASSWORD_STUB
+make-deploy-scaled|accretion-collector|-|1|$DB_PASSWORD_STUB --set dataCollector.replicaCount=2 --set dataCollector.kinds.log.split=true --set dataCollector.kinds.metric.split=true --set-string redis.auth.password=render-only-not-a-credential
 tilt|accretion-api|Tiltfile|1|@subtree-from:$TILT_VALUES:accretion-api $IDENTITY_STUB
 tilt|accretion-collector|Tiltfile|1|@subtree-from:$TILT_VALUES:accretion-collector --set config.k8s.namespaces={default,accretion-db}
 tilt|accretion-db|Tiltfile|1|@subtree-from:$TILT_VALUES:accretion-db
-tilt|accretion-discord|Tiltfile|1|@subtree-from:$TILT_VALUES:accretion-discord --set secret.botToken=$PLACEHOLDER --set secret.anthropicApiKey=$PLACEHOLDER --set discord.guildID=$PLACEHOLDER
+tilt|accretion-discord|Tiltfile|1|@subtree-from:$TILT_VALUES:accretion-discord --set discord.guildID=$PLACEHOLDER
 tilt|otel-collector|Tiltfile|1|@subtree-from:$TILT_VALUES:otel-collector
 EOF
 }
@@ -808,8 +832,37 @@ TF
   printf '%b\n' "${GREEN}The values-matrix detector fires: refused, empty and drifted value sets are all rejected by name, and a caller's values file is read rather than assumed${NC}"
 }
 
+# --print-subtree <central-file> <chart>: one chart's subtree from the central
+# values file, as JSON on stdout, ready to hand to `helm -f -`.
+#
+# It exists so that OTHER gates can read a subtree without growing a second copy
+# of values_subtree_file. #135's secrets-keys-check grew exactly that copy --
+# the same synthetic chart, the same toJson template, the same sed -- and lost
+# what this one had learned (the per-key cache, the `local` expansion gotcha at
+# the top of that function) in the process. Two implementations of "read one
+# chart's subtree out of deploy/tilt.yaml using helm as the parser" is the drift
+# these gates exist to prevent, and the copy lived in a Makefile recipe, the
+# harder of the two to exercise.
+#
+# The selfcheck above covers this path already: it drives values_subtree_file
+# directly, including the absent-subtree refusal, so this mode inherits a tested
+# reader rather than needing its own proof.
+print_subtree() {
+  local file="$1" chart="$2" d out
+  if [ -z "$file" ] || [ -z "$chart" ]; then
+    echo "usage: $0 --print-subtree <central-values-file> <chart>" >&2
+    return 2
+  fi
+  d=$(mktemp -d)
+  # shellcheck disable=SC2064  # $d is expanded now, deliberately
+  trap "rm -rf '$d'" EXIT
+  out=$(values_subtree_file "$chart" "$file" "$d") || return 1
+  cat "$out"
+}
+
 case "${1:-}" in
-  --selfcheck) selfcheck ;;
-  "")          run_matrix ;;
-  *) echo "usage: $0 [--selfcheck]" >&2; exit 2 ;;
+  --selfcheck)     selfcheck ;;
+  --print-subtree) print_subtree "${2:-}" "${3:-}" ;;
+  "")              run_matrix ;;
+  *) echo "usage: $0 [--selfcheck | --print-subtree <central-values-file> <chart>]" >&2; exit 2 ;;
 esac

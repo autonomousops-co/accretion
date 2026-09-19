@@ -446,11 +446,18 @@ config:
     host: "accretion-db-postgresql.accretion-db.svc.cluster.local"
     port: 5432
     user: "postgres"
+    # SECURITY: no password value in this file (#134). It read "postgres" until
+    # then, so a default `helm install` pointed every collector at a database
+    # whose password is published in this repository. Empty, and
+    # templates/secrets.yaml refuses to render rather than falling back to a
+    # working default or generating one: set existingSecret below (recommended)
+    # or pass --set-string config.database.password="$ACCRETION_DATABASE_PASSWORD".
+    #
     # Source for the chart-owned postgresql-secret Secret (templates/secrets.yaml),
     # read at runtime via the ACCRETION_DATABASE_PASSWORD env var (secretKeyRef) --
-    # never written into the ConfigMap. DEV ONLY: ignored entirely once
-    # existingSecret below is set.
-    password: "postgres"
+    # never written into the ConfigMap. Ignored entirely once existingSecret
+    # below is set.
+    password: ""
     # RECOMMENDED FOR PRODUCTION (see README.md, #113). When set, the chart does
     # NOT create its own postgresql-secret: every container/initContainer that
     # reads the database password (wait-for-postgres, and the collector,
