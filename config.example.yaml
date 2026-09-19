@@ -46,19 +46,21 @@ database:
   host: "localhost"
   port: 5432
   user: "postgres"
-  password: "postgres"
+  # password is deliberately absent (#129). Set ACCRETION_DATABASE_PASSWORD.
+  # There is no default either: a well-known one is a credential that works, so
+  # an install that set none would connect silently instead of failing.
   database: "accretion"
   sslmode: "disable"
 
 llm:
   provider: "ollama" # ollama, openai, or anthropic
   openai:
-    api_key: "" # or set ACCRETION_LLM_OPENAI_API_KEY env var
+    # api_key is deliberately absent (#129). Set ACCRETION_LLM_OPENAI_API_KEY.
     base_url: "https://api.openai.com/v1"
   ollama:
     base_url: "http://localhost:11434"
   anthropic:
-    api_key: "" # or set ACCRETION_LLM_ANTHROPIC_API_KEY env var
+    # api_key is deliberately absent (#129). Set ACCRETION_LLM_ANTHROPIC_API_KEY.
     base_url: "" # leave empty for default
   embedding_model: "nomic-embed-text:latest"
   chat_model: "llama3:8b"
@@ -114,17 +116,25 @@ tempo:
 auth:
   oauth:
     provider: "google"
+    # client_id is NOT a secret: it is visible in every browser redirect, so it
+    # is ordinary configuration and belongs here.
     client_id: "your-google-client-id"
-    client_secret: "your-google-client-secret"
+    # client_secret is deliberately absent (#129). Set OAUTH_CLIENT_SECRET.
     redirect_url: "http://localhost:8080/auth/callback"
     scopes: ["openid", "profile", "email"]
     auth_url: "https://accounts.google.com/o/oauth2/auth"
     token_url: "https://oauth2.googleapis.com/token"
     user_info_url: "https://www.googleapis.com/oauth2/v2/userinfo"
-  # Hex ONLY, at least 64 hex characters (32 bytes).
+  # session_key is deliberately absent (#129). Set SESSION_KEY.
+  #
+  # It signs AND encrypts the session cookie, so a leaked one is an auth bypass,
+  # not an information leak. That is why no placeholder is offered here: a
+  # predictable signing key is worse than an absent one, because it would work.
+  # Absent a key the process refuses to start and names the variable to set.
+  #
   # Generate with: openssl rand -hex 32
-  # `openssl rand -hex 16` is 32 characters but decodes to 16 bytes, and is rejected.
-  session_key: "replace-me-openssl-rand-hex-32"
+  # Hex ONLY, at least 64 hex characters (32 bytes). `openssl rand -hex 16` is
+  # 32 characters but decodes to 16 bytes, and is rejected.
   cookie_domain: ""
   cookie_secure: true # Set to false for localhost development
 
@@ -156,11 +166,20 @@ auth:
   admin_emails: ["admin@example.com", "devops@company.com"]
   admin_domains: ["yourdomain.com"] # All users from @yourdomain.com get admin access
 
-# Environment variables can override config values:
-# ACCRETION_LLM_OPENAI_API_KEY - OpenAI API key
+# Secrets do not appear in this file at all (#129). Each one has exactly one
+# source: the environment, read from the gitignored .env locally and from a
+# Kubernetes Secret via secretKeyRef in-cluster. `accretion generate config`
+# prints this same list.
+#
+# ACCRETION_DATABASE_PASSWORD    - database password (no default; required)
+# SESSION_KEY                    - session signing key (64+ hex chars; openssl rand -hex 32)
+# OAUTH_CLIENT_SECRET            - OAuth client secret
+# ACCRETION_LLM_OPENAI_API_KEY   - OpenAI API key
 # ACCRETION_LLM_ANTHROPIC_API_KEY - Anthropic API key
-# OAUTH_CLIENT_ID - OAuth client ID
-# OAUTH_CLIENT_SECRET - OAuth client secret
-# SESSION_KEY - Session encryption key (64+ hex chars; openssl rand -hex 32)
+#
+# Non-secret values above can also be overridden from the environment, e.g.
+# OAUTH_CLIENT_ID, or any key as ACCRETION_<SECTION>_<KEY>.
+#
 # (API key identities are a struct list; viper has no env binding for one, so
-#  they come from this file only — the chart delivers them via its ConfigMap.)
+#  they come from this file only — the chart delivers them via its ConfigMap.
+#  Only the SHA-256 digest of each key is configured, never the key itself.)
