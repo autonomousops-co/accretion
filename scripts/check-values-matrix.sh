@@ -180,8 +180,8 @@ default|accretion-db|-|1|$DB_PASSWORD_STUB $PG_PASSWORD_STUB
 default|accretion-discord|-|0|
 default|otel-collector|-|1|
 make-deploy-dev|accretion-api|-|1|-f charts/accretion-api/values-dev.yaml $IDENTITY_STUB
-make-deploy-staging|accretion-api|-|1|-f charts/accretion-api/values-staging.yaml $IDENTITY_STUB --set-string config.database.password=$PLACEHOLDER --set-string postgresql.auth.postgresPassword=$PLACEHOLDER
-make-deploy-prod|accretion-api|-|1|-f charts/accretion-api/values-prod.yaml $IDENTITY_STUB --set-string config.database.password=$PLACEHOLDER --set-string postgresql.auth.postgresPassword=$PLACEHOLDER
+make-deploy-staging|accretion-api|-|1|-f charts/accretion-api/values-staging.yaml $IDENTITY_STUB --set-string config.database.password=$PLACEHOLDER
+make-deploy-prod|accretion-api|-|1|-f charts/accretion-api/values-prod.yaml $IDENTITY_STUB --set-string config.database.password=$PLACEHOLDER
 make-deploy|accretion-collector|-|1|$DB_PASSWORD_STUB
 make-deploy-scaled|accretion-collector|-|1|$DB_PASSWORD_STUB --set dataCollector.replicaCount=2 --set dataCollector.kinds.log.split=true --set dataCollector.kinds.metric.split=true --set-string redis.auth.password=render-only-not-a-credential
 tilt|accretion-api|Tiltfile|1|@subtree-from:$TILT_VALUES:accretion-api $IDENTITY_STUB
@@ -832,8 +832,37 @@ TF
   printf '%b\n' "${GREEN}The values-matrix detector fires: refused, empty and drifted value sets are all rejected by name, and a caller's values file is read rather than assumed${NC}"
 }
 
+# --print-subtree <central-file> <chart>: one chart's subtree from the central
+# values file, as JSON on stdout, ready to hand to `helm -f -`.
+#
+# It exists so that OTHER gates can read a subtree without growing a second copy
+# of values_subtree_file. #135's secrets-keys-check grew exactly that copy --
+# the same synthetic chart, the same toJson template, the same sed -- and lost
+# what this one had learned (the per-key cache, the `local` expansion gotcha at
+# the top of that function) in the process. Two implementations of "read one
+# chart's subtree out of deploy/tilt.yaml using helm as the parser" is the drift
+# these gates exist to prevent, and the copy lived in a Makefile recipe, the
+# harder of the two to exercise.
+#
+# The selfcheck above covers this path already: it drives values_subtree_file
+# directly, including the absent-subtree refusal, so this mode inherits a tested
+# reader rather than needing its own proof.
+print_subtree() {
+  local file="$1" chart="$2" d out
+  if [ -z "$file" ] || [ -z "$chart" ]; then
+    echo "usage: $0 --print-subtree <central-values-file> <chart>" >&2
+    return 2
+  fi
+  d=$(mktemp -d)
+  # shellcheck disable=SC2064  # $d is expanded now, deliberately
+  trap "rm -rf '$d'" EXIT
+  out=$(values_subtree_file "$chart" "$file" "$d") || return 1
+  cat "$out"
+}
+
 case "${1:-}" in
-  --selfcheck) selfcheck ;;
-  "")          run_matrix ;;
-  *) echo "usage: $0 [--selfcheck]" >&2; exit 2 ;;
+  --selfcheck)     selfcheck ;;
+  --print-subtree) print_subtree "${2:-}" "${3:-}" ;;
+  "")              run_matrix ;;
+  *) echo "usage: $0 [--selfcheck | --print-subtree <central-values-file> <chart>]" >&2; exit 2 ;;
 esac

@@ -70,9 +70,6 @@ COLLECTOR_VALUES ?=
 # and override this. Named so that a grep for it in a cluster finds nothing and
 # a reader who sees it in a diff does not go looking for where it is stored.
 DB_PASSWORD_RENDER := --set-string config.database.password=render-only-not-a-credential
-# The same thing for the Bitnami subchart's superuser password, needed wherever
-# a values file turns postgresql.enabled on.
-PG_PASSWORD_RENDER := --set-string postgresql.auth.postgresPassword=render-only-not-a-credential
 # Database TLS for the collector deploy path.
 #
 # charts/accretion-collector/values-{staging,prod}.yaml carried
@@ -1142,7 +1139,13 @@ secrets-identity-check: ## Verify each identity's hash is the digest of its plai
 # is what lets db-password be compared like every other key rather than being
 # the one key the gate is structurally blind to. Within a secretKeyRef block the
 # only lines adjacent to `name:` are `key:`, `name:` and `optional:`, so looking
-# both ways adds no false positives.
+# both ways adds no false positives TODAY -- and `refs` does not trust that it
+# will stay true. It counts the `name: <secret>` lines and requires the
+# extraction to yield exactly that many keys, so a future hand-written block
+# with an `optional:` sitting between `name:` and `key:` fails the gate rather
+# than vanishing from it. A key only the chart reads, missed here, is a silent
+# pass and a pod that fails at rollout -- the very failure this gate exists to
+# prevent, arriving through the gate itself.
 #
 # TWO Secrets since #135. accretion-discord-secrets was previously beyond this
 # gate's reach for a real reason: the script emitted only one of its four keys,
@@ -1151,50 +1154,51 @@ secrets-identity-check: ## Verify each identity's hash is the digest of its plai
 # four, the same comparison applies -- exact in both directions, because a key
 # the bot reads and the script does not emit fails the pod at rollout, while a
 # key the script emits and nothing reads is dead weight that outlives whatever
-# removed its reader. The bot is rendered from the REAL deploy/tilt.yaml subtree,
-# read back through helm itself (the one parser these gates may depend on),
-# rather than from flags transcribed here -- so the values under test are the
-# values that deploy. The count assertion is the vacuity guard: a chart that
-# stopped reading a key would otherwise agree with a script that stopped
-# emitting it.
+# removed its reader. The bot is rendered from the REAL deploy/tilt.yaml
+# subtree, read through `scripts/check-values-matrix.sh --print-subtree`, so the
+# values under test are the values that deploy. That mode exists because this
+# recipe first grew its own copy of that script's values_subtree_file -- same
+# synthetic chart, same toJson template, same sed -- and dropped the per-key
+# caching and the `local`-expansion note the original had learned. Two readers
+# of "one chart's subtree out of the central file" is the drift these gates
+# exist to prevent, so there is one, and that script's selfcheck already covers
+# it. The count-of-4 assertion is the other vacuity guard: a chart that stopped
+# reading a key would otherwise agree with a script that stopped emitting it.
 secrets-keys-check: ## Verify make-secret.sh emits exactly the Secret keys the charts read
-	@echo "$(BLUE)Diffing script Secret keys against the chart's secretKeyRefs...$(NC)"
+	@echo "$(BLUE)Diffing script Secret keys against the charts' secretKeyRefs...$(NC)"
 	@bash -c 'set -eo pipefail; \
 		d=$$(mktemp -d); trap "rm -rf $$d" EXIT; \
+		fail() { printf "%b\n" "$(RED)$$1$(NC)" >&2; exit 1; }; \
+		refs() { \
+			{ grep -B1 "name: $$2" "$$1"; grep -A1 "name: $$2" "$$1"; } \
+				| grep -oE "key: [a-z0-9-]+" | awk "{print \$$2}" > $$d/raw; \
+			want=$$(grep -c "name: $$2" "$$1" || true); \
+			got=$$(wc -l < $$d/raw | tr -d " "); \
+			[ "$$got" -eq "$$want" ] || fail "$$1 references $$2 $$want times but only $$got of those refs yielded a key. The extraction reads the line either side of name:, so a secretKeyRef whose key: sits further away (an optional: between them, say) is INVISIBLE to it -- and a key only the chart reads, missed here, is a silent pass and a pod that fails at rollout."; \
+			sort -u $$d/raw; \
+		}; \
 		bash scripts/make-secret.sh --print-keys | sort -u > $$d/script; \
 		helm template $(RELEASE_NAME) ./charts/accretion-api -f charts/accretion-api/values-dev.yaml \
 			--set-json "apiKeys=[{\"name\":\"ci\",\"hash\":\"$(ZERO_DIGEST)\",\"permissions\":[\"read:memory\"]}]" \
 			> $$d/render.yaml; \
-		{ grep -B1 "name: accretion-api-secrets" $$d/render.yaml; \
-		  grep -A1 "name: accretion-api-secrets" $$d/render.yaml; } \
-			| grep -oE "key: [a-z0-9-]+" \
-			| awk "{print \$$2}" | sort -u > $$d/chart; \
+		refs $$d/render.yaml accretion-api-secrets > $$d/chart; \
 		if ! diff -u $$d/chart $$d/script; then \
-			printf "%b\n" "$(RED)Secret key mismatch: < chart expects, > script emits$(NC)"; exit 1; \
+			fail "Secret key mismatch: < chart expects, > script emits"; \
 		fi; \
 		grep -oE "Secret key: [^[:space:]]+" env.example | awk "{print \$$3}" | sort -u > $$d/envexample; \
 		if ! diff -u $$d/script $$d/envexample; then \
-			printf "%b\n" "$(RED)env.example annotations drifted: < script emits, > env.example documents$(NC)"; exit 1; \
+			fail "env.example annotations drifted: < script emits, > env.example documents"; \
 		fi; \
 		printf "%b\n" "  ok  accretion-api-secrets: $$(wc -l < $$d/script | tr -d " ") keys match the chart, and env.example documents them"; \
 		bash scripts/make-secret.sh --print-discord-keys | sort -u > $$d/dscript; \
-		r=$$d/reader; mkdir -p $$r/templates; \
-		printf "apiVersion: v2\nname: subtreereader\nversion: 0.0.0\n" > $$r/Chart.yaml; \
-		printf "SUBTREE: {{ toJson (index .Values \"accretion-discord\") }}\n" > $$r/templates/dump.yaml; \
-		helm template subtreereader $$r -f deploy/tilt.yaml | sed -n "s/^SUBTREE: //p" | head -1 > $$d/dvalues.json; \
-		if [ ! -s $$d/dvalues.json ] || grep -qx "null" $$d/dvalues.json; then \
-			printf "%b\n" "$(RED)could not read the accretion-discord subtree out of deploy/tilt.yaml, so the bot would be rendered on chart defaults and this comparison would mean nothing$(NC)"; exit 1; \
-		fi; \
+		bash scripts/check-values-matrix.sh --print-subtree deploy/tilt.yaml accretion-discord > $$d/dvalues.json; \
 		helm template accretion-discord ./charts/accretion-discord -f $$d/dvalues.json > $$d/discord.yaml; \
-		{ grep -B1 "name: accretion-discord-secrets" $$d/discord.yaml; \
-		  grep -A1 "name: accretion-discord-secrets" $$d/discord.yaml; } \
-			| grep -oE "key: [a-z0-9-]+" | awk "{print \$$2}" | sort -u > $$d/dchart; \
+		refs $$d/discord.yaml accretion-discord-secrets > $$d/dchart; \
 		if ! diff -u $$d/dchart $$d/dscript; then \
-			printf "%b\n" "$(RED)accretion-discord-secrets key mismatch: < the bot reads, > the script emits$(NC)"; exit 1; \
+			fail "accretion-discord-secrets key mismatch: < the bot reads, > the script emits"; \
 		fi; \
 		n=$$(wc -l < $$d/dchart | tr -d " "); \
-		[ "$$n" -eq 4 ] || { \
-			printf "%b\n" "$(RED)the bot reads $$n keys from accretion-discord-secrets, expected 4 (its own API key, the Discord token and the two model keys). A render that reads fewer is not proof of agreement, it is a chart that stopped asking.$(NC)"; exit 1; }; \
+		[ "$$n" -eq 4 ] || fail "the bot reads $$n keys from accretion-discord-secrets, expected 4 (its own API key, the Discord token and the two model keys). A render that reads fewer is not proof of agreement, it is a chart that stopped asking."; \
 		printf "%b\n" "  ok  accretion-discord-secrets: the bot reads exactly the 4 keys the script emits"; \
 		printf "%b\n" "$(GREEN)Secret keys match the charts, and env.example documents them$(NC)"'
 
@@ -1296,6 +1300,14 @@ secrets-pulumi-check: ## Verify pulumi provisions every Secret key make-secret.s
 # warning names the replacement, goes to stderr, leaves the exit code at 0, and
 # never prints the value (a sentinel value must appear in neither stream).
 #
+# The value assertion is made TWICE, raw and base64-decoded, because --dry-run
+# prints a Secret manifest and every `data:` value in one is encoded. A plaintext
+# grep of that output cannot see a leaked credential at all -- it would be
+# looking for a string that is, by construction, never there -- so the claim
+# "never prints the value" read far more generally than what was tested. The
+# decode closes that: a stale name whose value reached the Secret is now caught
+# in the form it would actually appear in.
+#
 # The fixture carries ACCRETION_DATABASE_PASSWORD since #134 for the same reason
 # values-check's renders carry one: db-password joined the script's REQUIRED
 # list, and that check runs before the warning this gate is about, so a fixture
@@ -1317,6 +1329,11 @@ secrets-stale-check: ## Verify make-secret.sh warns about bare pre-rename LLM ke
 		done; \
 		if grep -q "$$sentinel" $$d/out $$d/err; then \
 			printf "%b\n" "$(RED)stale-name warning leaked the variable VALUE$(NC)"; exit 1; \
+		fi; \
+		awk "{ print }" $$d/out | sed -nE "s/^  [a-zA-Z0-9_.-]+: (.*)\$$/\1/p" | tr -d "\"" \
+			| while read -r b64; do printf "%s" "$$b64" | base64 -d 2>/dev/null || true; printf "\n"; done > $$d/decoded; \
+		if grep -q "$$sentinel" $$d/decoded; then \
+			printf "%b\n" "$(RED)a stale bare name reached the Secret: the sentinel is absent from the raw output but present once the data values are base64-DECODED. The plaintext grep above cannot see that, which is exactly the shape a leak would take in a manifest whose values are all encoded.$(NC)"; exit 1; \
 		fi; \
 		if grep -q "warning:" $$d/out; then \
 			printf "%b\n" "$(RED)warning went to stdout, which is the manifest$(NC)"; exit 1; \

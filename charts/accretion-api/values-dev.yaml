@@ -118,16 +118,20 @@ apiKeys: []
 # It used to be a chart-owned Secret carrying accretion-mcp's plaintext, which
 # is what made it structurally incompatible with the plaintext guard (#122).
 
+# NOT a database (#134 review). This chart declares no `dependencies:` — there
+# is no charts/ directory and no Chart.lock — so nothing here deploys
+# PostgreSQL; the database is the accretion-db release, which owns its own
+# superuser password and guards it in its own templates/_validation.tpl. The
+# `auth:` block that used to sit here configured nobody, and once #134 made the
+# API chart's copy of that guard unconditional it had to be fed to keep renders
+# passing: a check satisfied without touching the real database.
+#
+# What is left is read by exactly one template, pvc-creation-hook.yaml, which
+# pre-creates a PVC named for a StatefulSet this chart does not create either.
+# That is a separate pre-existing defect; these keys stay until it is addressed
+# so the rendered objects do not change here.
 postgresql:
   enabled: true
-  auth:
-    # Same rule as config.database above (#134): no password value in a tracked
-    # file. The local Postgres is deployed by the accretion-db chart, and
-    # scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD into
-    # accretion-db-secrets (key postgres-password, the name the Bitnami subchart
-    # reads) in the accretion-db namespace.
-    existingSecret: "accretion-db-secrets"
-    database: "accretion"
   primary:
     persistence:
       size: 8Gi

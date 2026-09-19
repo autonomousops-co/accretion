@@ -98,26 +98,25 @@ config:
 # the ones that call /api/chat.
 apiKeys: []
 
-# security.enforceStrongDbPassword is GONE (#134) and is deliberately not
-# restated here as `true`. The database-password guard is unconditional now, so
-# there is nothing to enable; a key helm does not recognise would read as a
-# setting that is doing work when it is doing none. Prod loses nothing -- it was
-# the only environment that used to switch the guard on, and the guard it
-# switched on is the one every environment now gets.
 security:
   # Reject any apiKeys entry carrying a plaintext `key`: prod identities are
   # hash-only so the plaintext never enters the Helm release.
   forbidPlaintextAPIKeys: true
 
+# NOT a database (#134 review). This chart declares no `dependencies:` — there
+# is no charts/ directory and no Chart.lock — so nothing here deploys
+# PostgreSQL; the database is the accretion-db release, which owns its own
+# superuser password and guards it in its own templates/_validation.tpl. The
+# `auth:` block that used to sit here configured nobody, and once #134 made the
+# API chart's copy of that guard unconditional it had to be fed to keep renders
+# passing: a check satisfied without touching the real database.
+#
+# What is left is read by exactly one template, pvc-creation-hook.yaml, which
+# pre-creates a PVC named for a StatefulSet this chart does not create either.
+# That is a separate pre-existing defect; these keys stay until it is addressed
+# so the rendered objects do not change here.
 postgresql:
   enabled: true
-  auth:
-    # SECURITY: do not hardcode the postgres superuser password. Provide it via
-    # an existingSecret, or --set-string postgresql.auth.postgresPassword=... at
-    # deploy time. Left empty so the chart guard rejects the insecure default.
-    existingSecret: ""  # e.g. "accretion-db-credentials"
-    postgresPassword: ""
-    database: "accretion"
   primary:
     persistence:
       size: 50Gi

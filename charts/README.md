@@ -65,6 +65,13 @@ Cross-namespace wiring: workers and the API reach Postgres at
   session key) come from a Kubernetes Secret (`accretion-api-secrets`), created by
   [`scripts/make-secret.sh`](../scripts/make-secret.sh) — the one mapping from `.env`'s SHELL_CASE
   names to the chart's dashed Secret keys.
+- **Supplying the password as a Helm value is the escape hatch, not the path.** Every guard below
+  points here rather than advertising it, because the three charts name one remedy and this file
+  carries the caveat once. `--set-string config.database.password=<value>` (and
+  `--set-string postgresql.auth.postgresPassword=<value>` for `accretion-db`) renders fine and puts
+  the value in your shell history and in the Helm release, where `helm get values` returns it in
+  cleartext to anyone who can reach the release — the same defect #135 removed from the Discord
+  bot's side. Use it for a throwaway render; use `existingSecret` for anything that runs.
 - **No chart carries a database password** (#134). Six checked-in values files shipped `postgres`
   until then, so a default `helm install` stood up a database whose password is public knowledge;
   `accretion-api`, `accretion-collector` and `accretion-db` now refuse to render with neither a

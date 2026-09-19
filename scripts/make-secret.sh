@@ -531,7 +531,7 @@ for entry in "${MAPPINGS[@]}"; do
   key="${entry%%:*}"
   value="$(resolve "${entry#*:}")"
   if [ -z "$value" ]; then
-    ! in_list "$key" "${REQUIRED[@]}" || missing+=("$key")
+    ! in_list "$key" "${REQUIRED[@]}" || missing+=("$key (${entry#*:})")
     continue
   fi
   (umask 077 && printf '%s' "$value" > "$workdir/$key")
@@ -539,9 +539,16 @@ for entry in "${MAPPINGS[@]}"; do
   ! in_list "$key" "${REQUIRED_ANY[@]}" || have_whitelist=1
 done
 
+# BOTH NAMES, not just the Secret key. The two conventions differ -- .env is
+# SHELL_CASE, the charts' secretKeyRefs are dashed-lowercase -- which is the
+# whole reason this script exists, so reporting only the key leaves the reader
+# to perform by hand the translation the script is here to do. `missing` carries
+# "<key> (<VAR>)" rather than the bare key for exactly that, and MAPPINGS is
+# where both halves already live.
 if [ "${#missing[@]}" -gt 0 ]; then
   echo "error: ${ENV_FILE} is missing values the chart requires (their secretKeyRefs are not optional, so the pod will not start):" >&2
   printf '  %s\n' "${missing[@]}" >&2
+  echo "Each line is: <Secret key> (<the variable to set in ${ENV_FILE}>)." >&2
   echo "Copy env.example to ${ENV_FILE} and fill them in." >&2
   exit 1
 fi

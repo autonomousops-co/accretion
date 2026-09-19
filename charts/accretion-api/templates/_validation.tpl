@@ -22,38 +22,46 @@ It FAILS rather than generating a password. A generated one would let the
 render succeed and the install come up, while nothing downstream — not the API,
 not the collectors, not the schema job — held the same value; the first symptom
 would be an authentication failure inside the cluster with no manifest saying
-why. Naming the two ways to supply it is cheaper, so the message names both,
-and names ACCRETION_DATABASE_PASSWORD because that is the variable the reader
-has to go and set.
+why. The message names the Secret to point at and the variable that fills it,
+which is cheaper than any fallback.
 
 When the operator supplies config.database.existingSecret the chart references
 that external secret for the db-password and never consults
-config.database.password, so the empty/"postgres" check does not apply and that
-path is skipped entirely (matching the guidance in values.yaml).
+config.database.password, so the check does not apply and that path is skipped.
 
-.Values.postgresql is read defensively through `default dict`. values.yaml
-declares no `postgresql` block at all — this chart has no such dependency, the
-database is the accretion-db chart's — so a bare `.Values.postgresql.enabled`
-is a nil-pointer error on the default render. It went unnoticed only because
-the opt-in flag meant the default render never reached this line.
+THE POSTGRESQL SUPERUSER PASSWORD IS NOT CHECKED HERE, and the reason is that
+this chart cannot deploy PostgreSQL. Chart.yaml declares no `dependencies:`,
+there is no charts/ directory and no Chart.lock, so `helm install accretion-api`
+brings up no database — the database is the accretion-db release, which declares
+the Bitnami dependency and carries the same guard in its own
+templates/_validation.tpl, where clearing it means actually supplying the
+password the server will use.
+
+A copy of that guard lived here until #134's review. It was opt-in and prod-only,
+so it almost never fired; making it unconditional made it fire everywhere, and
+then it had to be fed — an existingSecret in values-dev and values-example on a
+block nothing reads, empty keys in values-staging, and a --set flag in the
+render gates. All of that satisfied a check on a component that is not there.
+An operator following its message to the letter sets postgresql.auth.* on the
+API release, watches the render pass, and leaves the real database untouched: a
+check that can be cleared without doing the thing it checks for is worse than no
+check, because it reports success.
+
+.Values.postgresql survives in this chart for one unrelated reader,
+templates/pvc-creation-hook.yaml, which pre-creates a PVC named for a
+StatefulSet this chart does not create either. That is a separate defect and a
+separate change; it is named here so the next reader does not mistake the
+remaining key for a live database setting.
 */}}
 {{- define "accretion-api.validateDatabasePassword" -}}
 {{- if eq (.Values.config.database.existingSecret | default "") "" }}
 {{- $pw := .Values.config.database.password | default "" }}
 {{- if or (eq $pw "") (eq $pw "postgres") }}
-{{- fail "SECURITY: no database password. config.database.password is empty or the insecure default \"postgres\", and config.database.existingSecret is not set. Set config.database.existingSecret to a Secret carrying a db-password key -- scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD from your gitignored .env into accretion-api-secrets under exactly that key (see env.example). Or pass --set-string config.database.password=\"$ACCRETION_DATABASE_PASSWORD\", which puts the value into the Helm release. The chart will not invent one." }}
-{{- end }}
-{{- end }}
-{{- $pg := .Values.postgresql | default dict }}
-{{- if $pg.enabled }}
-{{- $auth := $pg.auth | default dict }}
-{{- $adminPw := $auth.postgresPassword | default "" }}
-{{- $existing := $auth.existingSecret | default "" }}
-{{- if and (eq $existing "") (or (eq $adminPw "") (eq $adminPw "postgres")) }}
-{{- fail "SECURITY: postgresql.auth.postgresPassword is empty or the insecure default \"postgres\" and no existingSecret is set. Set postgresql.auth.existingSecret to a Secret carrying the admin password -- scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD into accretion-db-secrets under postgres-password -- or pass --set-string postgresql.auth.postgresPassword=\"$ACCRETION_DATABASE_PASSWORD\"." }}
+{{- fail "SECURITY: no database password. config.database.password is empty or the insecure default \"postgres\", and config.database.existingSecret is not set. Point config.database.existingSecret at a Secret carrying a db-password key: scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD from your gitignored .env into accretion-api-secrets under exactly that key (see env.example), and deploy/pulumi.yaml and deploy/tilt.yaml both name it. charts/README.md documents the --set-string escape hatch and why a password passed as a Helm value is readable afterwards with `helm get values`. The chart will not invent one." }}
 {{- end }}
 {{- end }}
 {{- end }}
+
 
 {{/*
 Refuse to render an authenticated deployment that has no API-key identity, and

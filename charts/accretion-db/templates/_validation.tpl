@@ -30,14 +30,14 @@ of the old values file walk straight back in.
 {{- $adminPw := $auth.postgresPassword | default "" }}
 {{- $adminExisting := $auth.existingSecret | default "" }}
 {{- if and (eq $adminExisting "") (or (eq $adminPw "") (eq $adminPw "postgres")) }}
-{{- fail "SECURITY: no PostgreSQL superuser password. postgresql.auth.postgresPassword is empty or the insecure default \"postgres\" and postgresql.auth.existingSecret is not set, and the Bitnami subchart would GENERATE a random one that none of this platform's clients hold. Set postgresql.auth.existingSecret to a Secret carrying the password under postgres-password -- scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD from your gitignored .env into accretion-db-secrets under exactly that key (see env.example) -- or pass --set-string postgresql.auth.postgresPassword=\"$ACCRETION_DATABASE_PASSWORD\"." }}
+{{- fail "SECURITY: no PostgreSQL superuser password. postgresql.auth.postgresPassword is empty or the insecure default \"postgres\" and postgresql.auth.existingSecret is not set, and the Bitnami subchart would GENERATE a random one that none of this platform's clients hold. Set postgresql.auth.existingSecret to a Secret carrying the password under postgres-password -- scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD from your gitignored .env into accretion-db-secrets under exactly that key (see env.example). charts/README.md documents the --set-string escape hatch and why a password passed as a Helm value is readable afterwards with `helm get values`." }}
 {{- end }}
 {{- end }}
 {{- $existing := .Values.config.database.existingSecret | default "" }}
 {{- if eq $existing "" }}
 {{- $pw := .Values.config.database.password | default "" }}
 {{- if or (eq $pw "") (eq $pw "postgres") }}
-{{- fail "SECURITY: no database password for the schema job and the partition-maintenance cronjob. config.database.password is empty or the insecure default \"postgres\", and config.database.existingSecret is not set. Set config.database.existingSecret to a Secret carrying the password (config.database.existingSecretKey names the key, default db-password) -- scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD from your gitignored .env into accretion-db-secrets under that key -- or pass --set-string config.database.password=\"$ACCRETION_DATABASE_PASSWORD\", which puts the value into the Helm release. The chart will not invent one." }}
+{{- fail "SECURITY: no database password for the schema job and the partition-maintenance cronjob. config.database.password is empty or the insecure default \"postgres\", and config.database.existingSecret is not set. Set config.database.existingSecret to a Secret carrying the password (config.database.existingSecretKey names the key, default db-password) -- scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD from your gitignored .env into accretion-db-secrets under that key. charts/README.md documents the --set-string escape hatch and why a password passed as a Helm value is readable afterwards with `helm get values`. The chart will not invent one." }}
 {{- end }}
 {{- else }}
 {{/*
