@@ -49,9 +49,7 @@ database:
   # password is deliberately absent (#129). Set ACCRETION_DATABASE_PASSWORD.
   # The in-code default is gone too: a well-known password is a credential that
   # works, so an install that set none would connect silently instead of
-  # failing. Note the repo's own .envrc still exports `postgres` for local dev,
-  # so a directory-env shell has a working password without setting one; #134
-  # is retiring that export.
+  # failing.
   database: "accretion"
   sslmode: "disable"
 
@@ -134,8 +132,7 @@ auth:
   # not an information leak. That is why no placeholder is offered here: a
   # predictable signing key is worse than an absent one, because it would work.
   # Absent a key the process refuses to start, states the format, and names the
-  # variable to set — which is where the generation recipe lives now, next to
-  # where the value is actually typed.
+  # variable to set. The recipe lives with the variable, in env.example.
   cookie_domain: ""
   cookie_secure: true # Set to false for localhost development
 
@@ -171,11 +168,9 @@ auth:
 # environment: a gitignored .env locally, a Kubernetes Secret via secretKeyRef
 # in-cluster.
 #
-# The list of which secrets those are is NOT repeated here. `accretion generate
-# config` prints every omitted key beside the variable that supplies it, and
-# env.example holds the same mapping with the Secret keys an operator needs.
-# A copy in this file would be a third one that no test reads, so it would go
-# stale the first time a secret is added — silently, and while claiming parity.
+# For which secrets those are: `accretion generate config` prints every omitted
+# key beside the variable that supplies it, and env.example carries the same
+# mapping with the Kubernetes Secret keys.
 #
 # Non-secret values above can also be overridden from the environment, e.g.
 # OAUTH_CLIENT_ID, or any key as ACCRETION_<SECTION>_<KEY>.

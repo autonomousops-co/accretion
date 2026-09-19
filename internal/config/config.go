@@ -805,25 +805,22 @@ var OmittedSecrets = []OmittedSecret{
 	{Key: "llm.anthropic.api_key", EnvVar: "ACCRETION_LLM_ANTHROPIC_API_KEY"},
 }
 
-// googleOAuthTokenURL is Google's public OAuth token endpoint. It is a
-// documented URL every OAuth client redirects through, not a credential.
+// googleOAuthTokenURL is Google's public OAuth token endpoint, not a
+// credential. G101 flags it only because the name holding it contains "token".
 //
-// G101 flags it only because the name it is assigned to contains "token".
+// It is hoisted out of the OAuthConfig literal below because #nosec binds to
+// the ENCLOSING node: any annotation on that literal, whether blanket or
+// written on the TokenURL field line, silences G101 for the whole struct —
+// including a genuinely hardcoded ClientSecret added to it later. Measured in
+// situ, all three ways. Keeping the suppression out here preserves that
+// detection on the one struct in this file where a credential used to live.
 //
-// It is hoisted out of the OAuthConfig literal below so the suppression sits on
-// one line holding one public URL, where it can be checked at a glance, rather
-// than on the struct that used to hold ClientSecret. The annotation cannot be
-// narrowed any further in place: gosec attaches #nosec to the ENCLOSING node,
-// so written on the TokenURL field line it silences G101 for the whole
-// composite literal. Measured, not assumed.
-//
-// This buys scope, not detection. G101 does not report a hardcoded ClientSecret
-// in that literal either way — also measured: it stays silent with no
-// annotation present at all. What actually guards the omission is
-// TestGenerateDefaultOmitsSecrets, which reads the generated YAML back and
-// fails on any non-empty secret-named field. Keeping the struct free of a
-// blanket suppression only means a future G101 finding there is not
-// pre-silenced.
+// Do NOT move it back, and do not trust G101 as the only guard either: gosec
+// applies an entropy filter, so a low-entropy hardcoded secret
+// ("your-client-secret") is discarded before it is ever reported. That blind
+// spot is structural. TestGenerateDefaultOmitsSecrets is the stronger check —
+// it reads the generated YAML back and fails on any non-empty secret-named
+// field, whatever its entropy.
 const googleOAuthTokenURL = "https://oauth2.googleapis.com/token" // #nosec G101 -- public endpoint, not a credential
 
 // GenerateDefault writes a starting config to outputFile.
