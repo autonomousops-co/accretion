@@ -74,6 +74,10 @@ const validHexKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789a
 // non-hex, or sub-32-byte session key. Hex is the only accepted encoding, so the
 // three failure modes must be distinguishable from their messages alone —
 // wantContains asserts the operator is told which one they hit.
+//
+// It also covers #129: every one of those messages must name SESSION_KEY and
+// where it comes from. That part is asserted for the whole table below rather
+// than per-case, so a failure mode added later cannot omit it.
 func TestNewAuthManager_FailsClosedOnWeakSessionKey(t *testing.T) {
 	// A 64-character non-hex string: long enough that calling it "too weak" would
 	// be actively misleading, so it must be reported as NOT HEX (issue #65).
@@ -157,6 +161,17 @@ func TestNewAuthManager_FailsClosedOnWeakSessionKey(t *testing.T) {
 				for _, absent := range tc.wantAbsent {
 					if strings.Contains(err.Error(), absent) {
 						t.Errorf("error for %q must NOT say %q, got: %v", tc.sessionKey, absent, err)
+					}
+				}
+				// `openssl rand -hex 32` says how to make a key but not where to
+				// put it, which is the question an operator actually has when the
+				// process refuses to start. Since `accretion generate config` no
+				// longer writes one (#129), the message must name the variable and
+				// both places it is sourced from.
+				for _, want := range []string{"SESSION_KEY", ".env", "Kubernetes Secret"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error for %q must name %q so the operator knows where the key comes from, got: %v",
+							tc.sessionKey, want, err)
 					}
 				}
 				return

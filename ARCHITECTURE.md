@@ -32,7 +32,8 @@ separate Deployment in the cluster.
   switched on and off individually through `collectors.<kind>.enabled`, and a panicking collector is
   restarted on its own rather than taking the others down.
 - **`discord`** — the conversational Discord bot ([internal/discord](internal/discord)).
-- **`generate config`** — writes a default config file.
+- **`generate config`** — writes a default config file. It contains no secret (#129); the command
+  names the environment variable that supplies each one it left empty.
 
 The worker fleet is documented in [internal/worker](internal/worker/README.md).
 
