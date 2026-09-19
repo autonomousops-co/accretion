@@ -5,61 +5,52 @@ on insecure configuration.
 */}}
 
 {{/*
-Refuse to render when a strong database password is required but the configured
-value is empty or the insecure default "postgres". Operators must supply a real
-secret via `--set-string config.database.password=...` or an existingSecret.
-The guard is opt-in via `.Values.security.enforceStrongDbPassword` — values.yaml
-sets it `false` explicitly, so dev/staging values (which do not set it
-themselves) continue to template with their local defaults; values-prod.yaml
-sets it `true`.
+Refuse to render when no database password has been supplied, or when the
+supplied one is the insecure default "postgres".
 
-House idiom, also used below for forbidPlaintextAPIKeys in
-validateAPIKeyIdentities: `--set security=null`, or a leaf null like `--set
-security.enforceStrongDbPassword=null`, deletes the key from the merged
-Values entirely instead of falling back to whatever a -f values file set —
-confirmed by dumping .Values.security, the key comes back simply absent, not
-present as false. A naive check that reads absence as "off" is wrong whenever
-a values file meant it to be on. Comparing the formatted value instead of the
-raw one closes it: only an explicit `false` is the off switch; `true`,
-missing, and `null` all leave the guard active.
+UNCONDITIONAL since #134, and that is the whole change. The guard used to be
+opt-in via `.Values.security.enforceStrongDbPassword`, which values.yaml set
+`false` and only values-prod.yaml set `true` — so dev, staging and a bare
+`helm install` rendered with a checked-in "postgres" BY DESIGN, and the one
+environment that turned the guard on was the only one with no local database to
+protect. The flag is gone rather than pinned to true: a switch whose only safe
+position is "on" is not a setting, and leaving it readable invites the next
+values file to turn it off. Helm ignores unknown value keys, so a values file
+still carrying it has a dead key, not a weakened guard.
 
-Polarity trap specific to this flag: its own chart default is `false`
-(forbidPlaintextAPIKeys's is `true`), so "active only when explicitly true" —
-`eq (printf "%v" $sec.enforceStrongDbPassword) "true"` — looks like the
-correct inverse, and it is for values.yaml's own default. But absent is
-neither `true` nor `false`, so that form reads a nulled flag as inactive too,
-same as never configuring it — verified concretely against values-prod.yaml,
-which sets the flag true: with the insecure default password, `--set
-security=null` rendered successfully under that form, defeating the one
-environment that turns the guard on. The idiom's actual comparison, `ne
-(printf "%v" $sec.enforceStrongDbPassword) "false"`, closes it: values.yaml's
-real, explicit `false` is unaffected (it is not ambiguous), so a bare `helm
-install` keeps rendering with the checked-in "postgres" password. Only a
-deliberate `security=null` — already a malformed, adversarial override —
-makes the flag stricter than the values file asked for, the direction it is
-safe to fail toward.
+It FAILS rather than generating a password. A generated one would let the
+render succeed and the install come up, while nothing downstream — not the API,
+not the collectors, not the schema job — held the same value; the first symptom
+would be an authentication failure inside the cluster with no manifest saying
+why. Naming the two ways to supply it is cheaper, so the message names both,
+and names ACCRETION_DATABASE_PASSWORD because that is the variable the reader
+has to go and set.
+
+When the operator supplies config.database.existingSecret the chart references
+that external secret for the db-password and never consults
+config.database.password, so the empty/"postgres" check does not apply and that
+path is skipped entirely (matching the guidance in values.yaml).
+
+.Values.postgresql is read defensively through `default dict`. values.yaml
+declares no `postgresql` block at all — this chart has no such dependency, the
+database is the accretion-db chart's — so a bare `.Values.postgresql.enabled`
+is a nil-pointer error on the default render. It went unnoticed only because
+the opt-in flag meant the default render never reached this line.
 */}}
 {{- define "accretion-api.validateDatabasePassword" -}}
-{{- $sec := .Values.security | default dict }}
-{{- if ne (printf "%v" $sec.enforceStrongDbPassword) "false" }}
-{{- /*
-When the operator supplies config.database.existingSecret, the chart references
-that external secret for the db-password and never consults
-config.database.password — so the empty/"postgres" check does not apply. Skip it
-entirely in that path (matches the guidance in values.yaml / values-prod.yaml).
-*/}}
 {{- if eq (.Values.config.database.existingSecret | default "") "" }}
 {{- $pw := .Values.config.database.password | default "" }}
 {{- if or (eq $pw "") (eq $pw "postgres") }}
-{{- fail "SECURITY: config.database.password is empty or the insecure default \"postgres\". Supply a real password via --set-string config.database.password=... or an existingSecret (see charts/accretion-api/values-prod.yaml)." }}
+{{- fail "SECURITY: no database password. config.database.password is empty or the insecure default \"postgres\", and config.database.existingSecret is not set. Set config.database.existingSecret to a Secret carrying a db-password key -- scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD from your gitignored .env into accretion-api-secrets under exactly that key (see env.example). Or pass --set-string config.database.password=\"$ACCRETION_DATABASE_PASSWORD\", which puts the value into the Helm release. The chart will not invent one." }}
 {{- end }}
 {{- end }}
-{{- if .Values.postgresql.enabled }}
-{{- $adminPw := .Values.postgresql.auth.postgresPassword | default "" }}
-{{- $existing := .Values.postgresql.auth.existingSecret | default "" }}
+{{- $pg := .Values.postgresql | default dict }}
+{{- if $pg.enabled }}
+{{- $auth := $pg.auth | default dict }}
+{{- $adminPw := $auth.postgresPassword | default "" }}
+{{- $existing := $auth.existingSecret | default "" }}
 {{- if and (eq $existing "") (or (eq $adminPw "") (eq $adminPw "postgres")) }}
-{{- fail "SECURITY: postgresql.auth.postgresPassword is empty or the insecure default \"postgres\" and no existingSecret is set. Supply postgresql.auth.existingSecret or --set-string postgresql.auth.postgresPassword=..." }}
-{{- end }}
+{{- fail "SECURITY: postgresql.auth.postgresPassword is empty or the insecure default \"postgres\" and no existingSecret is set. Set postgresql.auth.existingSecret to a Secret carrying the admin password -- scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD into accretion-db-secrets under postgres-password -- or pass --set-string postgresql.auth.postgresPassword=\"$ACCRETION_DATABASE_PASSWORD\"." }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -83,13 +74,23 @@ to a DNS-1123 label.
 wherever plaintext must not enter the release — staging and prod do, and CI
 renders the checked-in values files with it so an example file cannot regress
 into shipping a working credential (which is what it did before it was caught).
-It defaults to true (values.yaml). `$forbidPlaintext` below uses the same
-null-safe idiom as validateDatabasePassword above (see that comment for the
-mechanism): only an explicit `false` disables it, so a missing or nulled
-security.forbidPlaintextAPIKeys stays active rather than silently readmitting
-plaintext. Here that coincides with the flag's own default, so there is no
-polarity trap to warn about — unlike enforceStrongDbPassword, "active unless
-false" and "true by default" agree.
+It defaults to true (values.yaml). `$forbidPlaintext` below compares the
+FORMATTED value rather than the raw one, and that is deliberate: `--set
+security=null`, or a leaf null like `--set security.forbidPlaintextAPIKeys=null`,
+deletes the key from the merged Values entirely instead of falling back to
+whatever a -f values file set — confirmed by dumping .Values.security, the key
+comes back simply absent, not present as false. A naive check that reads absence
+as "off" is wrong whenever a values file meant it to be on. `ne (printf "%v" ...)
+"false"` closes it: only an explicit `false` is the off switch, so a missing or
+nulled security.forbidPlaintextAPIKeys stays active rather than silently
+readmitting plaintext.
+
+(This idiom used to be shared with validateDatabasePassword, which carried the
+explanation and a warning about its own inverted polarity — that flag's chart
+default was `false`, so "active unless false" and "true by default" disagreed
+there. #134 deleted the flag outright and made that guard unconditional, so the
+trap is gone with it and the explanation lives here now. For this flag the two
+readings agree, and there is no polarity trap to warn about.)
 
 There is no longer a mutual-exclusion case to check first. The chart used to
 publish an identity's plaintext `key` to clients through an `mcpSecret` Secret,

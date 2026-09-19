@@ -61,8 +61,20 @@ spec:
               value: {{ .Values.config.database.port | quote }}
             - name: PGUSER
               value: {{ .Values.config.database.user | quote }}
+            # From a Secret, never a literal (#134). This rendered as a
+            # plaintext env `value:` in the Job's pod manifest, where anyone
+            # holding `get pod` in this namespace could read it -- far below the
+            # `get secrets` bar that reading a Secret requires. psql takes
+            # PGPASSWORD from the environment either way, so the credential's
+            # path to the process is unchanged; only its path into the manifest
+            # is. Deliberately not `optional`: an absent key must fail the Job
+            # at rollout, not leave the variable unset so psql prompts and the
+            # schema silently never gets applied.
             - name: PGPASSWORD
-              value: {{ .Values.config.database.password | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "accretion-db.dbSecretName" . }}
+                  key: {{ include "accretion-db.dbSecretKey" . }}
             - name: PGDATABASE
               value: {{ .Values.config.database.database | quote }}
           volumeMounts:

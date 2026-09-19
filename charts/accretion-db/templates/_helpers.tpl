@@ -51,6 +51,35 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Name of the Secret holding the database password, and the key inside it.
+
+Two halves of one decision, so they are defined once and read wherever a
+secretKeyRef is built (templates/schema-job.yaml,
+templates/partition-maintenance-cronjob.yaml). When the operator supplies
+config.database.existingSecret, that Secret and its existingSecretKey are what
+the jobs reference and the chart creates nothing of its own; otherwise
+templates/secret.yaml provides "<fullname>-db" with a db-password key.
+
+Spelling the pair out at each call site is how one of them drifts: a renamed key
+on one side and not the other renders perfectly well and fails at rollout.
+*/}}
+{{- define "accretion-db.dbSecretName" -}}
+{{- if .Values.config.database.existingSecret -}}
+{{- .Values.config.database.existingSecret -}}
+{{- else -}}
+{{- printf "%s-db" (include "accretion-db.fullname" .) -}}
+{{- end -}}
+{{- end }}
+
+{{- define "accretion-db.dbSecretKey" -}}
+{{- if .Values.config.database.existingSecret -}}
+{{- .Values.config.database.existingSecretKey | default "db-password" -}}
+{{- else -}}
+db-password
+{{- end -}}
+{{- end }}
+
+{{/*
 Create the name of the service account to use
 */}}
 {{- define "accretion-db.serviceAccountName" -}}

@@ -23,7 +23,16 @@ config:
     host: "accretion-db-postgresql.accretion-db.svc.cluster.local"
     port: 5432
     user: "postgres"
-    password: "postgres"
+    # No password here (#134) — this file is the one a stranger copies, so a
+    # working credential in it is a working credential in every install derived
+    # from it. The password comes from a Secret you create before installing:
+    #
+    #   ACCRETION_DATABASE_PASSWORD=... in .env, then scripts/make-secret.sh
+    #
+    # which publishes it into accretion-api-secrets under db-password, the key
+    # named below. With existingSecret set the chart creates no Secret of its
+    # own and never sees config.database.password.
+    existingSecret: "accretion-api-secrets"
     database: "accretion"
     sslmode: "disable"
 
@@ -72,7 +81,11 @@ apiKeys:
 postgresql:
   enabled: true
   auth:
-    postgresPassword: "postgres"
+    # Same rule as config.database above (#134): no password value in a tracked
+    # file. scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD into
+    # accretion-db-secrets under postgres-password, the key name the Bitnami
+    # subchart reads (auth.secretKeys.adminPasswordKey).
+    existingSecret: "accretion-db-secrets"
     database: "accretion"
   image:
     registry: docker.io

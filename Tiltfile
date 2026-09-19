@@ -223,18 +223,27 @@ local_resource(
 )
 
 
-# accretion-api-secrets, accretion-mcp-secrets and accretion-discord-secrets,
-# via the one mapping from .env's SHELL_CASE names to the charts' dashed Secret
-# keys (scripts/make-secret.sh). `--from-env-file=.env` used to be inlined here
-# and produced keys the chart never reads, which showed up only as a 401 on
-# every request. Runs before accretion-api, whose session-key / OAuth
-# secretKeyRefs are not optional -- and before accretion-discord, whose own
-# api-key secretKeyRef is not optional either.
+# accretion-api-secrets, accretion-mcp-secrets, accretion-discord-secrets and
+# accretion-db-secrets, via the one mapping from .env's SHELL_CASE names to the
+# charts' dashed Secret keys (scripts/make-secret.sh). `--from-env-file=.env`
+# used to be inlined here and produced keys the chart never reads, which showed
+# up only as a 401 on every request. Runs before accretion-api, whose
+# session-key / OAuth secretKeyRefs are not optional -- and before
+# accretion-discord, whose own api-key secretKeyRef is not optional either.
+#
+# It also runs before accretion-db now (#134). That release used to need no
+# secret at all because the chart carried `postgres` in its own values.yaml; it
+# now reads the password from accretion-db-secrets, and the schema Job is a
+# post-install hook, so the Secret has to exist in db_namespace before the
+# release is installed rather than merely before the pods settle. TWO
+# namespaces, because a Secret does not cross one: --namespace takes the app
+# Secrets, --db-namespace takes the database's copy of the same password.
 local_resource(
     'sync-secrets',
-    cmd='bash scripts/make-secret.sh --namespace ' + namespace,
+    cmd='bash scripts/make-secret.sh --namespace ' + namespace +
+        ' --db-namespace ' + db_namespace,
     deps=['.env', 'scripts/make-secret.sh'],
-    resource_deps=['accretion-core.namespace'],
+    resource_deps=['accretion-core.namespace', 'accretion-db.namespace'],
     labels=['services'],
 )
 
@@ -287,12 +296,16 @@ helm_resource(
     'accretion-db',
     chart='./charts/accretion-db',
     namespace=db_namespace,
-    # Chart defaults. The values file is passed anyway, and is an empty map in
-    # deploy/tilt.yaml: every chart Tilt deploys has a key there, so the guard
-    # that the keys equal the charts needs no exception, and this release gains
-    # somewhere to put a setting the day it needs one.
+    # Its subtree in deploy/tilt.yaml, which since #134 names the Secret the
+    # chart reads the database password from. It was an empty map until then --
+    # every chart Tilt deploys has a key there, so the guard that the keys equal
+    # the charts needs no exception -- and this is the setting it gained.
     flags=['--values', chart_values['accretion-db']],
-    resource_deps=['accretion-db.namespace'],
+    # sync-secrets, because the chart no longer carries a password of its own
+    # (#134): the Postgres superuser password and the schema Job's PGPASSWORD
+    # both come from accretion-db-secrets, and the schema Job is a post-install
+    # hook that runs as part of THIS install.
+    resource_deps=['accretion-db.namespace', 'sync-secrets'],
     labels=['infra'],
     pod_readiness='wait',
 )
@@ -471,9 +484,15 @@ if enable_collector:
         # own identity.
         'accretion-collector-trace-collector',
     ]
+    # accretion-collector-postgresql-secret is deliberately ABSENT since #134,
+    # for exactly the reason accretion-collector-redis-secret is: the chart no
+    # longer renders it on this path. deploy/tilt.yaml points the collector at
+    # config.database.existingSecret (accretion-api-secrets, built by
+    # sync-secrets from .env), and templates/secrets.yaml renders a Secret of its
+    # own ONLY when no existingSecret is set. Naming an object the chart does not
+    # render fails the LOAD, so nothing would deploy at all.
     collector_shared_objects = [
         'accretion-collector-config:configmap',
-        'accretion-collector-postgresql-secret:secret',
     ]
     for nm in collector_rbac_names:
         collector_shared_objects.append(nm + ':serviceaccount')

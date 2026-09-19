@@ -52,7 +52,14 @@ config:
     host: "accretion-db-postgresql.accretion-db.svc.cluster.local"
     port: 5432
     user: "postgres"
-    password: "postgres"
+    # No password here (#134). It read "postgres" until then, which is a working
+    # credential checked into a public repository. The password arrives through
+    # the Secret scripts/make-secret.sh builds from ACCRETION_DATABASE_PASSWORD
+    # in your gitignored .env — the same Secret name and key deploy/pulumi.yaml
+    # points this chart at, so dev and a cluster are pointed at one shape rather
+    # than two. With existingSecret set the chart creates no Secret of its own
+    # and never sees config.database.password at all.
+    existingSecret: "accretion-api-secrets"
     database: "accretion"
     sslmode: "disable"
 
@@ -114,7 +121,12 @@ apiKeys: []
 postgresql:
   enabled: true
   auth:
-    postgresPassword: "postgres"
+    # Same rule as config.database above (#134): no password value in a tracked
+    # file. The local Postgres is deployed by the accretion-db chart, and
+    # scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD into
+    # accretion-db-secrets (key postgres-password, the name the Bitnami subchart
+    # reads) in the accretion-db namespace.
+    existingSecret: "accretion-db-secrets"
     database: "accretion"
   primary:
     persistence:

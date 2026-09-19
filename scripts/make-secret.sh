@@ -10,11 +10,29 @@
 # and the API 401s every request. This script is the one mapping, used by both
 # the Tiltfile and cluster installs so dev and prod share a single path.
 #
-# It emits THREE Secrets, because three different consumers read three different
+# It emits FOUR Secrets, because four different consumers read four different
 # things and all are sourced from the same .env:
 #
 #   accretion-api-secrets   the server's own key material (session key, OAuth
-#                           client, LLM key, the user whitelist).
+#                           client, LLM key, the user whitelist) and, since
+#                           #134, the DATABASE PASSWORD under db-password.
+#                           accretion-api and accretion-collector both point
+#                           config.database.existingSecret here, so the one
+#                           ACCRETION_DATABASE_PASSWORD in .env is what every
+#                           client in the app namespace holds -- the same shape
+#                           deploy/pulumi.yaml has used all along. The charts
+#                           shipped a working "postgres" default until then.
+#   accretion-db-secrets    the SAME password, in the database's own namespace,
+#                           under two keys because two readers name it
+#                           differently: postgres-password is what the Bitnami
+#                           subchart's auth.secretKeys.adminPasswordKey reads,
+#                           db-password is what accretion-db's schema Job and
+#                           partition-maintenance CronJob read. One variable
+#                           feeds both, so the server and the jobs cannot end
+#                           up with different passwords. This is the one Secret
+#                           that does NOT live in --namespace: the database
+#                           deliberately runs in its own namespace, and a
+#                           Secret is not readable across one.
 #   accretion-mcp-secrets   the MCP client's credential, under the exact keys
 #                           internal/mcp/secrets resolves: ACCRETION_API_URL,
 #                           ACCRETION_API_KEY and a CA pointer. The four
@@ -54,7 +72,8 @@
 #                           singular from .env values.
 #
 # Usage:
-#   scripts/make-secret.sh [--namespace NS] [--env-file PATH] [--dry-run]
+#   scripts/make-secret.sh [--namespace NS] [--db-namespace NS] [--env-file PATH]
+#                          [--dry-run]
 #   scripts/make-secret.sh --print-keys        # accretion-api-secrets key names
 #   scripts/make-secret.sh --print-identities  # the apiKeys block .env implies
 #   scripts/make-secret.sh --print-identity-var NAME
@@ -77,6 +96,15 @@
 set -euo pipefail
 
 SECRET_NAME="accretion-api-secrets"
+# The Secret the accretion-db chart and its Bitnami subchart read, in the
+# database's OWN namespace. Both key names below are cross-chart references:
+# postgres-password is the subchart's auth.secretKeys.adminPasswordKey default,
+# db-password is what accretion-db's config.database.existingSecretKey names.
+# Change either and change charts/accretion-db/values.yaml and deploy/tilt.yaml
+# with it.
+DB_SECRET_NAME="accretion-db-secrets"
+DB_ADMIN_PASSWORD_KEY="postgres-password"
+DB_PASSWORD_KEY="db-password"
 # The Secret internal/mcp/secrets resolves, and the name the four checked-in
 # editor configs already carry in ACCRETION_MCP_SECRET_NAME.
 MCP_SECRET_NAME="accretion-mcp-secrets"
@@ -98,6 +126,11 @@ API_TLS_SECRET_NAME="accretion-api-tls"
 API_SERVICE_NAME="accretion-api"
 API_SERVICE_PORT=80
 NAMESPACE="${NAMESPACE:-accretion-core}"
+# The database's own namespace. Separate from NAMESPACE because the database
+# deliberately runs apart from accretion's own components (so the collectors can
+# ingest its telemetry without a log-amplification loop), and a Secret does not
+# cross a namespace -- the password therefore has to be published twice.
+DB_NAMESPACE="${DB_NAMESPACE:-accretion-db}"
 ENV_FILE=".env"
 MODE="apply"
 # The identity --print-identity-var was asked about. Empty in every other mode.
@@ -110,6 +143,7 @@ IDENTITY_ARG=""
 # than quietly reading it (see #56).
 MAPPINGS=(
   "session-key:SESSION_KEY"
+  "db-password:ACCRETION_DATABASE_PASSWORD"
   "oauth-client-id:OAUTH_CLIENT_ID"
   "oauth-client-secret:OAUTH_CLIENT_SECRET"
   "openai-api-key:ACCRETION_LLM_OPENAI_API_KEY"
@@ -132,6 +166,14 @@ REQUIRED=(
   "session-key"
   "oauth-client-id"
   "oauth-client-secret"
+  # #134. accretion-api's ACCRETION_DATABASE_PASSWORD and its wait-for-postgres
+  # PGPASSWORD, every collector's ACCRETION_DATABASE_PASSWORD, and accretion-db's
+  # schema Job and partition CronJob all read this through a secretKeyRef that is
+  # not optional. It is also the key the DB_SECRET_NAME Secret below is built
+  # from, so an absent value would leave the database itself without a password.
+  # Refusing here names the variable once, which is the whole point: the
+  # alternative used to be a checked-in "postgres" that worked.
+  "db-password"
 )
 
 # REQUIRED_ANY: the SERVER enforces this one — every ref below is
@@ -199,6 +241,7 @@ usage() {
 while [ $# -gt 0 ]; do
   case "$1" in
     -n|--namespace) NAMESPACE="$2"; shift 2 ;;
+    --db-namespace) DB_NAMESPACE="$2"; shift 2 ;;
     -f|--env-file)  ENV_FILE="$2"; shift 2 ;;
     --dry-run)      MODE="print"; shift ;;
     --print-keys)   MODE="keys"; shift ;;
@@ -522,6 +565,32 @@ manifest="$(kubectl create secret generic "$SECRET_NAME" \
   --namespace "$NAMESPACE" \
   "${args[@]}" \
   --dry-run=client -o yaml)"
+
+# accretion-db-secrets, in the DATABASE's namespace (#134).
+#
+# The same password as db-password above, published a second time because a
+# Secret does not cross a namespace and the database deliberately runs in its
+# own. Two keys, because its two readers name it differently and neither can be
+# told to use the other's name: the Bitnami subchart reads
+# auth.secretKeys.adminPasswordKey (postgres-password by default) for the
+# server's superuser password, while accretion-db's schema Job and partition
+# CronJob read config.database.existingSecretKey (db-password) for the client
+# side. Deriving both from one variable is what stops the server and its own
+# jobs ending up with different passwords -- the failure the chart used to
+# avoid by hardcoding "postgres" on both sides.
+#
+# Not conditional and not skipped: db-password is in REQUIRED above, so control
+# only reaches here with a value in hand. The workdir file it was written to is
+# reused rather than the value being re-read, so the plaintext stays out of argv
+# and out of this script's variables (see the note on argv above).
+db_manifest="$(kubectl create secret generic "$DB_SECRET_NAME" \
+  --namespace "$DB_NAMESPACE" \
+  --from-file="${DB_PASSWORD_KEY}=${workdir}/db-password" \
+  --from-file="${DB_ADMIN_PASSWORD_KEY}=${workdir}/db-password" \
+  --dry-run=client -o yaml)"
+manifest="$manifest
+---
+$db_manifest"
 
 # accretion-mcp-secrets, under the exact keys internal/mcp/secrets resolves.
 #

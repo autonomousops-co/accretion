@@ -52,7 +52,16 @@ config:
     host: "accretion-db-postgresql.accretion-db.svc.cluster.local"
     port: 5432
     user: "postgres"
-    password: "postgres"
+    # SECURITY: never hardcode the staging database password in this file. It
+    # read "postgres" until #134, which the old opt-in guard let through because
+    # only values-prod.yaml turned that guard on — staging shipped the insecure
+    # default by design. Staging is now shaped like prod: supply it at deploy
+    # time with
+    #   helm ... --set-string config.database.password="$ACCRETION_DATABASE_PASSWORD"
+    # or, better, point config.database.existingSecret at a Secret carrying a
+    # db-password key so the value never enters the Helm release at all. The
+    # chart guard (templates/_validation.tpl) refuses to render with neither.
+    password: ""
     database: "accretion"
     sslmode: "require"
 
@@ -81,7 +90,12 @@ security:
 postgresql:
   enabled: true
   auth:
-    postgresPassword: "postgres"
+    # SECURITY: same rule as config.database above (#134). Supply the superuser
+    # password at deploy time via postgresql.auth.existingSecret, or
+    # --set-string postgresql.auth.postgresPassword="$ACCRETION_DATABASE_PASSWORD".
+    # Left empty so the chart guard rejects the insecure default.
+    existingSecret: ""  # e.g. "accretion-db-credentials"
+    postgresPassword: ""
     database: "accretion"
   primary:
     persistence:

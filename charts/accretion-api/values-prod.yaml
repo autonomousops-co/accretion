@@ -65,11 +65,13 @@ config:
     user: "postgres"
     # SECURITY: never hardcode the prod database password in this file.
     # Supply it at deploy time via one of:
-    #   helm ... --set-string config.database.password=$ACCRETION_DB_PASSWORD
-    #   or mount an existingSecret and reference it.
-    # The chart guard (templates/_validation.tpl, enabled by
-    # security.enforceStrongDbPassword below) refuses to render when this is
-    # empty or the insecure default "postgres".
+    #   helm ... --set-string config.database.password="$ACCRETION_DATABASE_PASSWORD"
+    #   or mount an existingSecret and reference it (deploy/pulumi.yaml does:
+    #   existingSecret: accretion-api-secrets, key db-password).
+    # The chart guard (templates/_validation.tpl) refuses to render when this is
+    # empty or the insecure default "postgres" and no existingSecret is set.
+    # That guard is unconditional since #134 -- prod used to be the only
+    # environment that turned it on.
     password: ""
     database: "accretion"
     # verify-full authenticates the server against a trusted CA (protects against
@@ -96,12 +98,13 @@ config:
 # the ones that call /api/chat.
 apiKeys: []
 
-# Enforce a strong, operator-supplied database password in prod. When true, the
-# chart guard in templates/_validation.tpl fails the render if the password is
-# empty or the insecure default "postgres". Only prod sets this; dev/staging
-# leave it unset so their local defaults still template.
+# security.enforceStrongDbPassword is GONE (#134) and is deliberately not
+# restated here as `true`. The database-password guard is unconditional now, so
+# there is nothing to enable; a key helm does not recognise would read as a
+# setting that is doing work when it is doing none. Prod loses nothing -- it was
+# the only environment that used to switch the guard on, and the guard it
+# switched on is the one every environment now gets.
 security:
-  enforceStrongDbPassword: true
   # Reject any apiKeys entry carrying a plaintext `key`: prod identities are
   # hash-only so the plaintext never enters the Helm release.
   forbidPlaintextAPIKeys: true

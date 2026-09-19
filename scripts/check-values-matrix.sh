@@ -76,6 +76,25 @@ IDENTITY_STUB='--set-json apiKeys=[{"name":"ci","hash":"'"$ZERO_DIGEST"'","permi
 # resolve to on a particular stack.
 PLACEHOLDER=values-matrix-placeholder
 
+# The chart-defaults rows' database password, and the same kind of thing as
+# IDENTITY_STUB above rather than a value under test (#134). accretion-api,
+# accretion-collector and accretion-db all refuse to render with no password and
+# no existingSecret -- a deliberate fail-closed default, like the empty-`apiKeys`
+# one IDENTITY_STUB exists for -- so a row meaning "chart defaults and nothing
+# else" still has to supply one or it fails for a reason that has nothing to do
+# with the caller under test.
+#
+# Only the rows that render CHART DEFAULTS carry it. Every real caller below
+# names a Secret instead, which is the shape #134 moved them to: the tilt rows
+# get config.database.existingSecret out of deploy/tilt.yaml, the
+# make-deploy-staging/prod rows pass the deploy-time password their values files
+# document, and the dev and example files name accretion-api-secrets themselves.
+# Adding it to a tilt row would ALSO break drift_check, correctly: the Tiltfile
+# passes no such flag, and a matrix row that does is a row no longer describing
+# its caller.
+DB_PASSWORD_STUB='--set-string config.database.password=render-only-not-a-credential'
+PG_PASSWORD_STUB='--set-string postgresql.auth.postgresPassword=render-only-not-a-credential'
+
 # The Tiltfile's central values file (#119). Every static setting Tilt used to
 # pass as an inline --set flag lives there, nested by chart name, and the
 # Tiltfile materialises each chart's subtree at load.
@@ -149,17 +168,17 @@ TILT_VALUES=deploy/tilt.yaml
 # ---------------------------------------------------------------------------
 matrix_rows() {
   cat <<EOF
-default|accretion-api|-|1|$IDENTITY_STUB
+default|accretion-api|-|1|$IDENTITY_STUB $DB_PASSWORD_STUB
 example|accretion-api|-|1|-f charts/accretion-api/values-example.yaml
-default|accretion-collector|-|1|
-default|accretion-db|-|1|
+default|accretion-collector|-|1|$DB_PASSWORD_STUB
+default|accretion-db|-|1|$DB_PASSWORD_STUB $PG_PASSWORD_STUB
 default|accretion-discord|-|0|
 default|otel-collector|-|1|
 make-deploy-dev|accretion-api|-|1|-f charts/accretion-api/values-dev.yaml $IDENTITY_STUB
 make-deploy-staging|accretion-api|-|1|-f charts/accretion-api/values-staging.yaml $IDENTITY_STUB --set-string config.database.password=$PLACEHOLDER --set-string postgresql.auth.postgresPassword=$PLACEHOLDER
 make-deploy-prod|accretion-api|-|1|-f charts/accretion-api/values-prod.yaml $IDENTITY_STUB --set-string config.database.password=$PLACEHOLDER --set-string postgresql.auth.postgresPassword=$PLACEHOLDER
-make-deploy|accretion-collector|-|1|
-make-deploy-scaled|accretion-collector|-|1|--set dataCollector.replicaCount=2 --set dataCollector.kinds.log.split=true --set dataCollector.kinds.metric.split=true --set-string redis.auth.password=render-only-not-a-credential
+make-deploy|accretion-collector|-|1|$DB_PASSWORD_STUB
+make-deploy-scaled|accretion-collector|-|1|$DB_PASSWORD_STUB --set dataCollector.replicaCount=2 --set dataCollector.kinds.log.split=true --set dataCollector.kinds.metric.split=true --set-string redis.auth.password=render-only-not-a-credential
 tilt|accretion-api|Tiltfile|1|@subtree-from:$TILT_VALUES:accretion-api $IDENTITY_STUB
 tilt|accretion-collector|Tiltfile|1|@subtree-from:$TILT_VALUES:accretion-collector --set config.k8s.namespaces={default,accretion-db}
 tilt|accretion-db|Tiltfile|1|@subtree-from:$TILT_VALUES:accretion-db

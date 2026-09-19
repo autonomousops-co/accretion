@@ -2,7 +2,24 @@
 postgresql:
   enabled: true
   auth:
-    postgresPassword: "postgres"
+    # SECURITY: no password value in this file (#134). It read "postgres" until
+    # then, so `helm install accretion-db` stood up a database whose superuser
+    # password is published in this repository.
+    #
+    # Point existingSecret at a Secret carrying the admin password under
+    # `postgres-password` -- the subchart's own auth.secretKeys.adminPasswordKey
+    # default, so nothing else has to be named. scripts/make-secret.sh publishes
+    # ACCRETION_DATABASE_PASSWORD from your gitignored .env into
+    # accretion-db-secrets under exactly that key, in this chart's namespace.
+    #
+    # Leaving BOTH empty is refused at render time (templates/_validation.tpl).
+    # That guard is what stands between this chart and the subchart's own
+    # fallback: with no password and no existingSecret the Bitnami chart
+    # GENERATES a random one, which renders green and then authenticates none of
+    # the clients -- accretion-api, the collectors, the schema job -- that hold
+    # the password from somewhere else.
+    existingSecret: ""
+    postgresPassword: ""
     database: "accretion"
   image:
     registry: docker.io
@@ -141,6 +158,25 @@ config:
     host: "accretion-db-postgresql"
     port: 5432
     user: "postgres"
-    password: "postgres"
+    # SECURITY: no password value in this file (#134). The schema job and the
+    # partition-maintenance cronjob read it, and until #134 they read it as a
+    # plaintext env `value:` in their own pod manifests -- readable by anyone
+    # holding `get pod`, which is far below the `get secrets` bar. Both now read
+    # it through secretKeyRef, from the Secret named here.
+    #
+    # Set existingSecret to the same Secret postgresql.auth.existingSecret above
+    # names; scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD into
+    # accretion-db-secrets under BOTH postgres-password (for the subchart) and
+    # db-password (for the jobs below), so one variable feeds both sides and
+    # they cannot disagree. Leaving both this and existingSecret empty is
+    # refused at render time (templates/_validation.tpl).
+    password: ""
+    # When set, the chart creates no Secret of its own (templates/secret.yaml)
+    # and both jobs reference this operator-provisioned one by name and key.
+    existingSecret: ""
+    # Key inside existingSecret holding the password. Render time refuses an
+    # existingSecret with this blanked out, so a misconfigured chart fails at
+    # `helm template` rather than independently at each job's rollout.
+    existingSecretKey: "db-password"
     database: "accretion"
     sslmode: "disable"
