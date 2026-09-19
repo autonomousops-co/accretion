@@ -45,12 +45,17 @@ const sentinelPrefix = "SENTINEL-SECRET-"
 // Both sides of the suffix test are lowercased so this answers for snake_case
 // YAML keys as well as Go field names: TestGenerateDefaultOmitsSecrets (#129)
 // asks it about `token_url` and `key_file`, which a case-sensitive HasSuffix
-// would call credentials. It changes no answer for any field that exists today
-// -- "TokenURL" and "token_url" both end in "url". It does move the line for
-// hypothetical ones: a field named TokenUri or Keyfile counted as a credential
-// before and is exempt now, which is the fail-open direction.
-// TestCredentialFieldNaming pins those cases so the shift is visible if such a
-// field is ever added.
+// would call credentials. That is the change's purpose, and it moves no field
+// that exists today -- "TokenURL" already ended in the exact "URL" the old list
+// carried.
+//
+// It does move hypothetical ones, always in the fail-open direction, and the
+// rule is about CASE rather than about particular names: the old list matched
+// File, URL, Uri, Path, Dir and Name exactly, so a locator suffix spelled ANY
+// other way (Keyfile, TokenUrl, TokenURI, Passworddir) missed every exemption,
+// fell through to the needles and came back a credential. All of those are
+// exempt now. TestCredentialFieldNaming pins three of them so the shift is
+// visible if such a field is ever added.
 func credentialField(name string) bool {
 	lower := strings.ToLower(name)
 	for _, suffix := range []string{"file", "url", "uri", "path", "dir", "name"} {
@@ -94,9 +99,16 @@ func TestCredentialFieldNaming(t *testing.T) {
 		"token_url": false, "key_file": false, "base_url": false,
 		// Not credentials at all.
 		"Host": false, "Port": false, "Provider": false, "ClientID": false,
-		// Case-folding consequences of #129. Both were credentials before it
-		// and are exempt now; see credentialField.
-		"TokenUri": false, "Keyfile": false,
+		// Case-folding consequences of #129: a locator suffix spelled in any
+		// case the old list did not carry exactly. All three were credentials
+		// before it and are exempt now, so each fires if the lowercasing is
+		// reverted. Verified by running the pre-#129 function beside this one
+		// rather than by reading it. See credentialField.
+		//
+		// TokenUri is deliberately NOT here: the old list carried "Uri" exactly,
+		// so that spelling was always exempt and a row for it would assert a
+		// value that never changed.
+		"TokenURI": false, "TokenUrl": false, "Keyfile": false,
 	}
 	for name, want := range cases {
 		if got := credentialField(name); got != want {
