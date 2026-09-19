@@ -34,14 +34,22 @@ const sentinelPrefix = "SENTINEL-SECRET-"
 // So a locator suffix disqualifies: a name ending in File, URL, Path, Dir or
 // Name points AT a secret rather than holding one. Only the value itself needs
 // masking; the path to it is ordinary configuration and is more useful logged.
+//
+// Both sides of the suffix test are lowercased so this answers for snake_case
+// YAML keys as well as Go field names: TestGenerateDefaultOmitsSecrets (#129)
+// asks it about `token_url` and `key_file`, which a case-sensitive HasSuffix
+// would call credentials. It changes no Go-field answer -- "TokenURL" and
+// "token_url" both end in "url" -- so it widens what the helper can be asked
+// about without moving the line for its original caller.
 func credentialField(name string) bool {
-	for _, suffix := range []string{"File", "URL", "Uri", "Path", "Dir", "Name"} {
-		if strings.HasSuffix(name, suffix) {
+	lower := strings.ToLower(name)
+	for _, suffix := range []string{"file", "url", "uri", "path", "dir", "name"} {
+		if strings.HasSuffix(lower, suffix) {
 			return false
 		}
 	}
-	lower := strings.ToLower(name)
-	for _, needle := range []string{"key", "token", "password", "secret"} {
+	// "cred" reaches Credentials-style names that none of the other needles do.
+	for _, needle := range []string{"key", "token", "password", "secret", "cred"} {
 		if strings.Contains(lower, needle) {
 			return true
 		}

@@ -805,6 +805,27 @@ var OmittedSecrets = []OmittedSecret{
 	{Key: "llm.anthropic.api_key", EnvVar: "ACCRETION_LLM_ANTHROPIC_API_KEY"},
 }
 
+// googleOAuthTokenURL is Google's public OAuth token endpoint. It is a
+// documented URL every OAuth client redirects through, not a credential.
+//
+// G101 flags it only because the name it is assigned to contains "token".
+//
+// It is hoisted out of the OAuthConfig literal below so the suppression sits on
+// one line holding one public URL, where it can be checked at a glance, rather
+// than on the struct that used to hold ClientSecret. The annotation cannot be
+// narrowed any further in place: gosec attaches #nosec to the ENCLOSING node,
+// so written on the TokenURL field line it silences G101 for the whole
+// composite literal. Measured, not assumed.
+//
+// This buys scope, not detection. G101 does not report a hardcoded ClientSecret
+// in that literal either way — also measured: it stays silent with no
+// annotation present at all. What actually guards the omission is
+// TestGenerateDefaultOmitsSecrets, which reads the generated YAML back and
+// fails on any non-empty secret-named field. Keeping the struct free of a
+// blanket suppression only means a future G101 finding there is not
+// pre-silenced.
+const googleOAuthTokenURL = "https://oauth2.googleapis.com/token" // #nosec G101 -- public endpoint, not a credential
+
 // GenerateDefault writes a starting config to outputFile.
 //
 // It carries no secret (#129). Every key in OmittedSecrets is written empty and
@@ -881,7 +902,7 @@ func GenerateDefault(outputFile string) error {
 				RedirectURL: "http://localhost:8080/auth/callback",
 				Scopes:      []string{"openid", "profile", "email"},
 				AuthURL:     "https://accounts.google.com/o/oauth2/auth",
-				TokenURL:    "https://oauth2.googleapis.com/token",
+				TokenURL:    googleOAuthTokenURL,
 				UserInfoURL: "https://www.googleapis.com/oauth2/v2/userinfo",
 			},
 			CookieDomain:   "",

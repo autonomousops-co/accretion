@@ -892,13 +892,14 @@ func TestCollectorSecretsRequireExplicitBind(t *testing.T) {
 //
 // It asserts twice, because the two checks fail on different mistakes:
 //
-//   - Every key in OmittedSecrets comes out empty. This ties the list
-//     `accretion generate config` prints to what the file actually contains, so
-//     a key that is listed as omitted but left populated fails here.
-//   - No secret-looking key anywhere in the tree is a non-empty string. The
-//     first check cannot see a secret nobody remembered to list, and a list is
-//     exactly the thing that gets forgotten when a field is added, so this one
-//     is driven off the generated YAML instead.
+//   - Every key in OmittedSecrets resolves, and comes out empty. This ties the
+//     list `accretion generate config` prints to what the file actually
+//     contains, so a key listed as omitted but left populated fails here, and
+//     so does a misspelled one that describes no field at all.
+//   - No key anywhere in the tree that credentialField calls a credential is a
+//     non-empty string. The first check cannot see a secret nobody remembered
+//     to list, and a list is exactly the thing that gets forgotten when a field
+//     is added, so this one is driven off the generated YAML instead.
 //
 // Empty is the bar, not absent: none of these fields carry omitempty, so
 // `session_key: ""` is what a secret-free config looks like. A present-but-blank
@@ -925,7 +926,15 @@ func TestGenerateDefaultOmitsSecrets(t *testing.T) {
 	for _, secret := range OmittedSecrets {
 		value, found := lookupYAMLPath(tree, strings.Split(secret.Key, "."))
 		if !found {
-			continue // absent is at least as good as empty
+			// A key that does not resolve is a typo, not a stricter omission. No
+			// field in Config carries omitempty, so every real key is present and
+			// empty; a misspelled one would otherwise assert nothing here while
+			// `accretion generate config` went on printing it as the name of a
+			// value the operator should set.
+			t.Errorf("OmittedSecrets names %q, which does not exist in the generated config. "+
+				"Fix the key or drop the entry; `generate config` prints it as the source of %s.",
+				secret.Key, secret.EnvVar)
+			continue
 		}
 		if s, ok := value.(string); !ok || s != "" {
 			t.Errorf("Generated config has %s = %#v, want empty; it is supplied by %s",
@@ -940,23 +949,6 @@ func TestGenerateDefaultOmitsSecrets(t *testing.T) {
 	}
 }
 
-// secretKeySubstrings are the name fragments that make a config key
-// secret-bearing. Matching on the name is deliberately blunt: it costs a false
-// positive on a harmless key, which is a one-line fix, and catches a real
-// credential nobody thought to list, which is the failure that matters.
-//
-// "api_key" also matches auth.api_key_identities, which holds SHA-256 digests
-// rather than keys. That is not a problem in practice: the entries are a struct
-// list, and scanYAMLForSecrets only reports non-empty strings.
-var secretKeySubstrings = []string{"password", "secret", "api_key", "session_key", "token"}
-
-// notSecretKeySuffixes are endpoint-shaped names that "token" would otherwise
-// match. auth.oauth.token_url is the provider's public token endpoint, not a
-// credential, and every OAuth config has one. The carve-out is on the suffix
-// rather than the whole key so a newly added *_url stays exempt without an edit
-// here, while a bare `token` or `access_token` is still caught.
-var notSecretKeySuffixes = []string{"_url", "_uri", "_endpoint"}
-
 // secretFinding is one non-empty secret-looking value found in a YAML tree.
 type secretFinding struct {
 	key   string // dotted path, e.g. "auth.session_key"
@@ -964,28 +956,33 @@ type secretFinding struct {
 }
 
 // scanYAMLForSecrets walks every mapping in a decoded YAML tree and reports the
-// non-empty string leaves whose key name matches secretKeySubstrings. prefix is
-// the dotted path of the node being walked; pass nil at the root.
+// non-empty string leaves whose key name denotes a credential. prefix is the
+// dotted path of the node being walked; pass nil at the root.
+//
+// The "is this a secret?" rule is credentialField from sanitize_test.go — the
+// same package, and already the repository's answer to that question. A second
+// list here would be a second policy: two definitions of what counts as a
+// credential, drifting apart, with this one the weaker of the two. It misses
+// the bare `key` shape that credentialField carries deliberately, which is not
+// hypothetical — APIClientConfig.Key is the field whose omission from
+// DiscordConfig.Sanitize printed the bot's API key to its pod log on every
+// restart.
+//
+// Two gaps are known and shared with credentialField, left there on purpose.
+// A name that denotes a credential without matching a needle (`dsn`, a
+// connection string) is not caught, and neither is a non-string value — a
+// secret stored as a number or a list walks past. Widening the needles costs
+// false positives on a check whose whole value is that it is never switched
+// off; when a config grows a field of either shape, the fix belongs in
+// credentialField so both tests gain it at once.
 func scanYAMLForSecrets(node interface{}, prefix []string) []secretFinding {
 	var findings []secretFinding
 
 	visit := func(name string, child interface{}) {
 		path := append(append([]string{}, prefix...), name)
 		if s, ok := child.(string); ok {
-			if s == "" {
-				return
-			}
-			lower := strings.ToLower(name)
-			for _, suffix := range notSecretKeySuffixes {
-				if strings.HasSuffix(lower, suffix) {
-					return
-				}
-			}
-			for _, fragment := range secretKeySubstrings {
-				if strings.Contains(lower, fragment) {
-					findings = append(findings, secretFinding{key: strings.Join(path, "."), value: s})
-					return
-				}
+			if s != "" && credentialField(name) {
+				findings = append(findings, secretFinding{key: strings.Join(path, "."), value: s})
 			}
 			return
 		}
