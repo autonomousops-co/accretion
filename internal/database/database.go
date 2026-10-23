@@ -67,10 +67,15 @@ const (
 	ResourceTypePVCStatus        = "pvc_status"
 	ResourceTypePVStatus         = "pv_status"
 	ResourceTypeConfigMap        = "configmap"
-	ResourceTypeSecret           = "secret"
-	ResourceTypeJobStatus        = "job_status"
-	ResourceTypeCronJobStatus    = "cronjob_status"
-	ResourceTypeTrace            = "trace"
+	// Read path only -- nothing has written a `secret` row since Secrets left
+	// monitoring scope, and no chart role grants a verb on them. Retained so
+	// rows written before that change stay queryable rather than rendering
+	// blank; see SecretEntry for the full contract, and do not reintroduce a
+	// writer (#131).
+	ResourceTypeSecret        = "secret"
+	ResourceTypeJobStatus     = "job_status"
+	ResourceTypeCronJobStatus = "cronjob_status"
+	ResourceTypeTrace         = "trace"
 )
 
 // MinSimilarityThreshold is the minimum cosine similarity score for search results.
