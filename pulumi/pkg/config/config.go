@@ -100,7 +100,7 @@ func NewConfig(ctx *pulumi.Context) *Config {
 			NodeCidr:    getStringOrDefault(cfg, "nodeCidr", "10.0.0.0/22"),
 		},
 		GKE: GKEConfig{
-			ClusterName:       getStringOrDefault(cfg, "clusterName", "accretion-api-"+env),
+			ClusterName:       getStringOrDefault(cfg, "clusterName", "accretion-"+env),
 			NodeCount:         getIntOrDefault(cfg, "nodeCount", 1),
 			MinNodes:          getIntOrDefault(cfg, "minNodes", 1),
 			MaxNodes:          getIntOrDefault(cfg, "maxNodes", 3),
@@ -109,7 +109,11 @@ func NewConfig(ctx *pulumi.Context) *Config {
 			KubernetesVersion: getStringOrDefault(cfg, "kubernetesVersion", "1.29"),
 		},
 		DNS: DNSConfig{
-			Domain:      getStringOrDefault(cfg, "domain", "accretion-api.dev"),
+			// RFC 2606 reserved, mirroring charts/accretion-api/values-*.yaml
+			// (#128). A stack that omits `domain` previews and validates but
+			// serves nothing, rather than inheriting the domain of whoever
+			// wrote this file. Set it per stack in stacks/Pulumi.<stack>.yaml.
+			Domain:      getStringOrDefault(cfg, "domain", "example.com"),
 			ManagedZone: getStringOrDefault(cfg, "managedZone", "accretion-api-zone"),
 		},
 		App: AppConfig{

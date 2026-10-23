@@ -19,7 +19,7 @@ const testStaticIPName = "accretion-infrastructure-prod-static-ip"
 
 func testConfig() *config.Config {
 	cfg := &config.Config{Environment: "prod", Stack: "prod"}
-	cfg.DNS.Domain = "accretion-api.dev"
+	cfg.DNS.Domain = "example.com"
 	cfg.App.ImageTag = "stable"
 	cfg.App.Namespace = "accretion-system"
 	cfg.App.EnableDiscord = true
