@@ -29,7 +29,7 @@ copyright in your work is able to agree to it.
 
 ## Getting set up
 
-You need Go 1.25, Docker, `kind`, `kubectl`, `helm`, `tilt`, `direnv`, and
+You need Go 1.26, Docker, `kind`, `kubectl`, `helm`, `tilt`, `direnv`, and
 `pre-commit`. `make preflight` reports on all of them, plus your git hooks and
 the Go tooling, and tells you what is missing.
 

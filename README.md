@@ -134,7 +134,7 @@ Runs the full stack on a local [kind](https://kind.sigs.k8s.io/) cluster via
 [Quick Start (cluster deployment)](#quick-start-cluster-deployment) carry the alternatives and the
 failure modes; go there when something here does not fit.
 
-**Prerequisites:** Go 1.25, Docker, `kind`, `kubectl`, `helm`, `tilt`, `direnv`. This repo is all you
+**Prerequisites:** Go 1.26, Docker, `kind`, `kubectl`, `helm`, `tilt`, `direnv`. This repo is all you
 need. [CONTRIBUTING.md](CONTRIBUTING.md#notes-for-linux) covers two Linux-specific gotchas (Docker
 group membership and inotify limits for `kind`).
 
@@ -273,7 +273,7 @@ one trace by id. It is a thin HTTP proxy over `accretion-api` — all retrieval 
 server-side, so it needs no database access. Full tool reference:
 [internal/mcp](internal/mcp/README.md).
 
-**1. Build and install the binary** (Go 1.25; installs to `$(go env GOPATH)/bin`, which must be on
+**1. Build and install the binary** (Go 1.26; installs to `$(go env GOPATH)/bin`, which must be on
 your `PATH`). `make tilt-up` already depends on this target, so after `make up` it is a no-op:
 
 ```bash

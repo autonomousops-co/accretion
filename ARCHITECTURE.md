@@ -1,6 +1,6 @@
 # Architecture — Go codebase
 
-Module `github.com/autonomousops-co/accretion`, Go 1.25. The module root is the repository
+Module `github.com/autonomousops-co/accretion`, Go 1.26. The module root is the repository
 root (so `internal/database` imports as `github.com/autonomousops-co/accretion/internal/database`).
 Dependencies are vendored; the Docker image builds with `-mod=vendor`.
 
