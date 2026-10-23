@@ -1098,8 +1098,9 @@ config lives in [config.example.yaml](config.example.yaml).
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, the checks a change has to pass,
-and the Contributor License Agreement that opening a pull request accepts. Security vulnerabilities
-go through [SECURITY.md](SECURITY.md), never a public issue.
+and the Contributor License Agreement that opening a pull request accepts. Participation is governed
+by the [Code of Conduct](CODE_OF_CONDUCT.md). Security vulnerabilities and conduct reports both go
+to the private inbox in [SECURITY.md](SECURITY.md), never a public issue.
 
 ## License
 
