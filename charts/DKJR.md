@@ -8,8 +8,16 @@ interesting to record. It is a **development fixture, not part of Accretion**.
 It used to ship inside the `accretion-api` chart and be brought up by `make up`
 from a sibling `../dkjr` clone. It no longer is: Accretion's default bring-up
 deploys Accretion only, and DKJR is installed on demand with a plain
-`helm install` from [its own repo](https://github.com/autonomousops-co/dkjr),
-which owns the chart, the image, and the documentation of every knob.
+`helm install` from its own repository, which owns the chart, the image, and
+the documentation of every knob.
+
+> **That repository is not public (#130).** `autonomousops-co/dkjr` is an
+> internal development fixture, so the `git clone` and `helm install` lines
+> below resolve only for someone who already has access to it. They are kept
+> here because they are what the dev team runs -- not as instructions a reader
+> of the public repository can follow. Nothing in Accretion needs DKJR: it
+> exists to give the collectors something interesting to record, and every
+> instruction outside this page stands without it.
 
 ## Install
 
@@ -60,7 +68,7 @@ it read as one. Accretion collects nothing from DKJR until you add it back.
   `ns_monitors` in the [Tiltfile](../Tiltfile), `ACCRETION_K8S_NAMESPACES` in
   [`.envrc`](../.envrc), or `k8s.namespaces` in
   [`config.example.yaml`](../config.example.yaml). The status collector opens
-  about ten informers per namespace listed, so add it while you are using the
+  about nine informers per namespace listed, so add it while you are using the
   fixture and drop it when you are done.
 - **Release name.** Install into the `dkjr` namespace, or add whichever
   namespace you choose to those lists.
