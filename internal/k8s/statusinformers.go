@@ -39,16 +39,19 @@ import (
 // nothing of the rest of a shared cluster; a label or "*" scope, whose
 // membership changes, gets one cluster-wide informer with the scope applied to
 // each object as it arrives. Both paths still run the object through
-// inScope, so the set written is identical either way. The trade is ten watch
+// inScope, so the set written is identical either way. The trade is nine watch
 // streams per namespace on the static path (pods, deployments, replicasets,
-// HPAs, endpointslices, PVCs, configmaps, secrets, jobs, cronjobs; nodes and
-// PVs are cluster-scoped and open once) -- served from the apiserver's watch
-// cache and multiplexed over HTTP/2, though the apiserver caps streams per
-// connection (http2-max-streams-per-connection, default 250), so at
-// twenty-five namespaces client-go transparently opens a second TLS
-// connection -- against a cache that grows with the cluster rather than the
-// scope on the other. Measured at 30 namespaces: 302 informers, ~17 MiB of
-// heap and stacks, ~2,700 goroutines, ~10 s to sync. It works; the status
+// HPAs, endpointslices, PVCs, configmaps, jobs, cronjobs; nodes and PVs are
+// cluster-scoped and open once) -- served from the apiserver's watch cache and
+// multiplexed over HTTP/2, though the apiserver caps streams per connection
+// (http2-max-streams-per-connection, default 250), so at twenty-five
+// namespaces client-go transparently opens a second TLS connection -- against
+// a cache that grows with the cluster rather than the scope on the other.
+// Measured at 30 namespaces: 302 informers, ~17 MiB of heap and stacks, ~2,700
+// goroutines, ~10 s to sync. Those figures predate Secrets leaving scope: 302
+// is 30x10 plus the two cluster-scoped informers, so they were taken while a
+// tenth per-namespace stream was still open. Read them as an upper bound on
+// the nine listed above, not a fresh measurement (#132). It works; the status
 // command warns once at startup past about twenty namespaces so an operator
 // knows what a long static list costs. This is the one place those numbers
 // live.
