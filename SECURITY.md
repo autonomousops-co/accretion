@@ -72,9 +72,10 @@ needed to collect it, so the areas most worth your attention are:
 
 These are known, deliberate, and documented as development-only:
 
-- Local development defaults in `.envrc` and `values-dev.yaml`, chiefly the
-  `postgres`/`postgres` database credentials. They exist for a local kind cluster
-  and are not intended for any real deployment.
+- Local development defaults in `.envrc` and `values-dev.yaml`. They exist for a
+  local kind cluster and are not intended for any real deployment. The database
+  password is not among them: it is sourced from a gitignored `.env` locally and
+  a Kubernetes Secret in-cluster, and the charts fail closed without it.
 
   **No API key is among them.** Every identity in every checked-in values file
   carries a SHA-256 `hash` and nothing else; the plaintext each client sends
