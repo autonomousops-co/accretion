@@ -26,7 +26,10 @@ def read_env():
 
 env_vars = read_env()
 
-anthropic_api_key = os.getenv("ACCRETION_LLM_ANTHROPIC_API_KEY") or env_vars.get("ACCRETION_LLM_ANTHROPIC_API_KEY", "")
+# ACCRETION_LLM_ANTHROPIC_API_KEY is deliberately NOT read here any more (#135).
+# It was read only to be handed to Helm as `--set secret.anthropicApiKey=`;
+# scripts/make-secret.sh reads it into accretion-discord-secrets instead, and a
+# value this file does not hold is a value it cannot leak into a release.
 discord_bot_token = os.getenv("DISCORD_BOT_TOKEN") or env_vars.get("DISCORD_BOT_TOKEN", "")
 discord_guild_id = os.getenv("DISCORD_GUILD_ID") or env_vars.get("DISCORD_GUILD_ID", "")
 
@@ -223,18 +226,27 @@ local_resource(
 )
 
 
-# accretion-api-secrets, accretion-mcp-secrets and accretion-discord-secrets,
-# via the one mapping from .env's SHELL_CASE names to the charts' dashed Secret
-# keys (scripts/make-secret.sh). `--from-env-file=.env` used to be inlined here
-# and produced keys the chart never reads, which showed up only as a 401 on
-# every request. Runs before accretion-api, whose session-key / OAuth
-# secretKeyRefs are not optional -- and before accretion-discord, whose own
-# api-key secretKeyRef is not optional either.
+# accretion-api-secrets, accretion-mcp-secrets, accretion-discord-secrets and
+# accretion-db-secrets, via the one mapping from .env's SHELL_CASE names to the
+# charts' dashed Secret keys (scripts/make-secret.sh). `--from-env-file=.env`
+# used to be inlined here and produced keys the chart never reads, which showed
+# up only as a 401 on every request. Runs before accretion-api, whose
+# session-key / OAuth secretKeyRefs are not optional -- and before
+# accretion-discord, whose own api-key secretKeyRef is not optional either.
+#
+# It also runs before accretion-db now (#134). That release used to need no
+# secret at all because the chart carried `postgres` in its own values.yaml; it
+# now reads the password from accretion-db-secrets, and the schema Job is a
+# post-install hook, so the Secret has to exist in db_namespace before the
+# release is installed rather than merely before the pods settle. TWO
+# namespaces, because a Secret does not cross one: --namespace takes the app
+# Secrets, --db-namespace takes the database's copy of the same password.
 local_resource(
     'sync-secrets',
-    cmd='bash scripts/make-secret.sh --namespace ' + namespace,
+    cmd='bash scripts/make-secret.sh --namespace ' + namespace +
+        ' --db-namespace ' + db_namespace,
     deps=['.env', 'scripts/make-secret.sh'],
-    resource_deps=['accretion-core.namespace'],
+    resource_deps=['accretion-core.namespace', 'accretion-db.namespace'],
     labels=['services'],
 )
 
@@ -287,12 +299,16 @@ helm_resource(
     'accretion-db',
     chart='./charts/accretion-db',
     namespace=db_namespace,
-    # Chart defaults. The values file is passed anyway, and is an empty map in
-    # deploy/tilt.yaml: every chart Tilt deploys has a key there, so the guard
-    # that the keys equal the charts needs no exception, and this release gains
-    # somewhere to put a setting the day it needs one.
+    # Its subtree in deploy/tilt.yaml, which since #134 names the Secret the
+    # chart reads the database password from. It was an empty map until then --
+    # every chart Tilt deploys has a key there, so the guard that the keys equal
+    # the charts needs no exception -- and this is the setting it gained.
     flags=['--values', chart_values['accretion-db']],
-    resource_deps=['accretion-db.namespace'],
+    # sync-secrets, because the chart no longer carries a password of its own
+    # (#134): the Postgres superuser password and the schema Job's PGPASSWORD
+    # both come from accretion-db-secrets, and the schema Job is a post-install
+    # hook that runs as part of THIS install.
+    resource_deps=['accretion-db.namespace', 'sync-secrets'],
     labels=['infra'],
     pod_readiness='wait',
 )
@@ -380,12 +396,26 @@ helm_resource(
 # the bot cannot connect, so deploying it would only add a CrashLoopBackOff to
 # `tilt up`.
 #
-# The bot's credential FOR accretion-api is a second, separate key, and since
-# #119 it comes from the accretion-discord-secrets Secret sync-secrets creates
-# (api.secretName/secretKey in deploy/tilt.yaml). It used to come from the
-# accretion-api chart's client-keys Secret, which that chart emits only for a
-# PLAINTEXT identity -- so it stopped existing when #122 made every identity
-# hash-only, and the bot's pod could not start at all.
+# NO SECRET VALUE IS PASSED TO HELM (#135). The bot token and the model keys
+# reached the chart as `--set secret.botToken=...` / `--set
+# secret.anthropicApiKey=...` until then, read straight out of .env -- which put
+# three live credentials into the Helm release, where anyone who can reach it
+# gets them back in cleartext from `helm get values accretion-discord`. All
+# three now come from the accretion-discord-secrets Secret sync-secrets builds,
+# wired in deploy/tilt.yaml as secret.create=false plus explicit env entries,
+# which is the shape deploy/pulumi.yaml has always used. Only discord.guildID
+# is still a flag: it is an ID, not a credential, and it is per-developer, so it
+# has no place in a checked-in file either.
+#
+# Reading DISCORD_BOT_TOKEN here is still a read of .env, but only to DECIDE --
+# with no token the bot could only CrashLoopBackOff, so the release is skipped
+# entirely. The value itself goes no further than this `if`.
+#
+# The bot's credential FOR accretion-api is a fourth key in the same Secret, and
+# since #119 it comes from there rather than from the accretion-api chart's
+# client-keys Secret -- that chart emits that one only for a PLAINTEXT identity,
+# so it stopped existing when #122 made every identity hash-only, and the bot's
+# pod could not start at all.
 if discord_bot_token:
     helm_resource(
         'accretion-discord',
@@ -398,10 +428,7 @@ if discord_bot_token:
             # bot has no database connection, every cluster query goes through
             # accretion-api, and that chart declares no config.database at all.
             '--values', chart_values['accretion-discord'],
-            '--set', 'secret.botToken=' + discord_bot_token,
         ] + ([
-            '--set', 'secret.anthropicApiKey=' + anthropic_api_key,
-        ] if anthropic_api_key else []) + ([
             '--set', 'discord.guildID=' + discord_guild_id,
         ] if discord_guild_id else []),
         image_deps=['accretion-api'],
@@ -471,9 +498,15 @@ if enable_collector:
         # own identity.
         'accretion-collector-trace-collector',
     ]
+    # accretion-collector-postgresql-secret is deliberately ABSENT since #134,
+    # for exactly the reason accretion-collector-redis-secret is: the chart no
+    # longer renders it on this path. deploy/tilt.yaml points the collector at
+    # config.database.existingSecret (accretion-api-secrets, built by
+    # sync-secrets from .env), and templates/secrets.yaml renders a Secret of its
+    # own ONLY when no existingSecret is set. Naming an object the chart does not
+    # render fails the LOAD, so nothing would deploy at all.
     collector_shared_objects = [
         'accretion-collector-config:configmap',
-        'accretion-collector-postgresql-secret:secret',
     ]
     for nm in collector_rbac_names:
         collector_shared_objects.append(nm + ':serviceaccount')

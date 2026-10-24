@@ -31,22 +31,90 @@ const sentinelPrefix = "SENTINEL-SECRET-"
 // path and a URL. Neither is a credential, and a check that cries wolf twice
 // gets switched off, taking the real finding with it.
 //
-// So a locator suffix disqualifies: a name ending in File, URL, Path, Dir or
-// Name points AT a secret rather than holding one. Only the value itself needs
-// masking; the path to it is ordinary configuration and is more useful logged.
+// So a locator suffix disqualifies: a name ending in File, URL, Uri, Path, Dir
+// or Name points AT a secret rather than holding one. Only the value itself
+// needs masking; the path to it is ordinary configuration and is more useful
+// logged.
+//
+// The two lists are not symmetric, and that is the point. Widening the NEEDLES
+// fails closed -- a name that is not a credential gets masked, costing a line
+// of log detail. Widening the EXEMPTIONS fails open -- a real credential walks
+// past unmasked. A needle can be added on judgement; an exemption has to be
+// measured against the actual structs first.
+//
+// Both sides of the suffix test are lowercased so this answers for snake_case
+// YAML keys as well as Go field names: TestGenerateDefaultOmitsSecrets (#129)
+// asks it about `token_url` and `key_file`, which a case-sensitive HasSuffix
+// would call credentials. That is the change's purpose, and it moves no field
+// that exists today -- "TokenURL" already ended in the exact "URL" the old list
+// carried.
+//
+// It does move hypothetical ones, always in the fail-open direction, and the
+// rule is about CASE rather than about particular names: the old list matched
+// File, URL, Uri, Path, Dir and Name exactly, so a locator suffix spelled ANY
+// other way (Keyfile, TokenUrl, TokenURI, Passworddir) missed every exemption,
+// fell through to the needles and came back a credential. All of those are
+// exempt now. TestCredentialFieldNaming pins three of them so the shift is
+// visible if such a field is ever added.
 func credentialField(name string) bool {
-	for _, suffix := range []string{"File", "URL", "Uri", "Path", "Dir", "Name"} {
-		if strings.HasSuffix(name, suffix) {
+	lower := strings.ToLower(name)
+	for _, suffix := range []string{"file", "url", "uri", "path", "dir", "name"} {
+		if strings.HasSuffix(lower, suffix) {
 			return false
 		}
 	}
-	lower := strings.ToLower(name)
-	for _, needle := range []string{"key", "token", "password", "secret"} {
+	// "cred" matches no field in this package today; it is here so a
+	// Credentials-style name is covered on arrival rather than after a leak.
+	for _, needle := range []string{"key", "token", "password", "secret", "cred"} {
 		if strings.Contains(lower, needle) {
 			return true
 		}
 	}
 	return false
+}
+
+// TestCredentialFieldNaming pins credentialField's answer for the name shapes
+// where it is easy to get wrong, in both directions.
+//
+// The Uri/Keyfile rows are the ones worth the file space. Lowercasing both
+// sides of the suffix test (#129) so this helper could also answer for
+// snake_case YAML keys moved those from credential to exempt -- the fail-open
+// direction. No field in this package is named that way today, so nothing
+// regressed; these rows exist so that if one is ever added, the fact that it
+// arrives UNMASKED shows up as a deliberate decision recorded here rather than
+// as a surprise in a log.
+func TestCredentialFieldNaming(t *testing.T) {
+	cases := map[string]bool{
+		// Credentials: the value itself.
+		"Password": true, "SessionKey": true, "ClientSecret": true,
+		"APIKey": true, "RedisPassword": true, "Token": true,
+		// A bare Key is the shape that put the Discord bot's API key in its
+		// pod log; it must stay a credential.
+		"Key": true,
+		// snake_case, as the generated-config scan asks it (#129).
+		"session_key": true, "client_secret": true, "redis_password": true,
+		// Locators: they point AT a secret, and are more useful logged.
+		"KeyFile": false, "TokenURL": false, "CertFile": false,
+		"ConfigPath": false, "ServiceName": false, "BaseURL": false,
+		"token_url": false, "key_file": false, "base_url": false,
+		// Not credentials at all.
+		"Host": false, "Port": false, "Provider": false, "ClientID": false,
+		// Case-folding consequences of #129: a locator suffix spelled in any
+		// case the old list did not carry exactly. All three were credentials
+		// before it and are exempt now, so each fires if the lowercasing is
+		// reverted. Verified by running the pre-#129 function beside this one
+		// rather than by reading it. See credentialField.
+		//
+		// TokenUri is deliberately NOT here: the old list carried "Uri" exactly,
+		// so that spelling was always exempt and a row for it would assert a
+		// value that never changed.
+		"TokenURI": false, "TokenUrl": false, "Keyfile": false,
+	}
+	for name, want := range cases {
+		if got := credentialField(name); got != want {
+			t.Errorf("credentialField(%q) = %v, want %v", name, got, want)
+		}
+	}
 }
 
 // fillSecrets walks v and sets every credential-named string field to a unique

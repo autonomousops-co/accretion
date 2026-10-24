@@ -108,6 +108,21 @@ func newAPIKeyTable(identities []config.APIKeyIdentity) []apiKeyIdentity {
 	return table
 }
 
+// sessionKeySource names the variable that carries the session key and where it
+// is supposed to come from. Every decodeSessionKey error ends with it.
+//
+// `openssl rand -hex 32` alone tells an operator how to MAKE a key but not
+// where to put it, which is the actual question when a process refuses to
+// start (#129). Since `accretion generate config` no longer writes a key into
+// the generated file, the environment is the path an operator is expected to
+// take, so the error has to say so.
+//
+// Deliberately phrased as where the value SHOULD come from, not as a claim
+// that a config file is refused: auth.session_key is still read from config if
+// present, and viper gives the environment precedence over it either way.
+const sessionKeySource = "The key comes from the SESSION_KEY environment variable: the gitignored .env " +
+	"locally, a Kubernetes Secret via secretKeyRef in-cluster. Generate one with `openssl rand -hex 32`"
+
 // decodeSessionKey validates the configured session signing key and returns its
 // decoded bytes.
 //
@@ -121,8 +136,8 @@ func decodeSessionKey(sessionKey string) ([]byte, error) {
 		zap.Bool("present", sessionKey != ""), zap.Int("char_length", len(sessionKey)))
 
 	if sessionKey == "" {
-		return nil, fmt.Errorf("auth is enabled but no session key is configured: set a hex-encoded session " +
-			"key of at least 64 hex characters (32 bytes), e.g. `openssl rand -hex 32`")
+		return nil, fmt.Errorf("auth is enabled but no session key is configured: it must be a hex-encoded "+
+			"key of at least 64 hex characters (32 bytes). %s", sessionKeySource)
 	}
 
 	// Hex is the ONLY accepted encoding. The former raw-string fallback made the
@@ -142,18 +157,18 @@ func decodeSessionKey(sessionKey string) ([]byte, error) {
 		if errors.Is(err, hex.ErrLength) {
 			return nil, fmt.Errorf("auth is enabled but the session key is %d hexadecimal characters — an odd "+
 				"count, so it decodes to no whole number of bytes: it must be an even count, at least 64 hex "+
-				"characters (32 bytes). Generate one with `openssl rand -hex 32`", len(sessionKey))
+				"characters (32 bytes). %s", len(sessionKey), sessionKeySource)
 		}
 		return nil, fmt.Errorf("auth is enabled but the session key is not hex-encoded: it must be a hex "+
-			"string of at least 64 characters (32 bytes), got %d characters that are not valid hex. "+
-			"Generate one with `openssl rand -hex 32`", len(sessionKey))
+			"string of at least 64 characters (32 bytes), got %d characters that are not valid hex. %s",
+			len(sessionKey), sessionKeySource)
 	}
 	logger.Logger.Debug("Decoded hex session key",
 		zap.Int("char_length", len(sessionKey)), zap.Int("decoded_byte_length", len(keyBytes)))
 	if len(keyBytes) < 32 {
 		return nil, fmt.Errorf("auth is enabled but the session key is too short: %d hex characters decode "+
-			"to %d bytes, need at least 64 hex characters (32 bytes). Generate one with "+
-			"`openssl rand -hex 32`", len(sessionKey), len(keyBytes))
+			"to %d bytes, need at least 64 hex characters (32 bytes). %s",
+			len(sessionKey), len(keyBytes), sessionKeySource)
 	}
 	return keyBytes, nil
 }

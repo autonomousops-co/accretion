@@ -4,6 +4,9 @@ Thanks for your interest in the project. This page covers the Contributor Licens
 Agreement, how to get a working development environment, and what the automated
 checks will hold you to.
 
+Participation is governed by our [Code of Conduct](CODE_OF_CONDUCT.md). Conduct
+reports go to the same private inbox as security reports, never a public issue.
+
 ## Contributor License Agreement
 
 **By opening a pull request against this repository, you agree to the
@@ -26,7 +29,7 @@ copyright in your work is able to agree to it.
 
 ## Getting set up
 
-You need Go 1.25, Docker, `kind`, `kubectl`, `helm`, `tilt`, `direnv`, and
+You need Go 1.26, Docker, `kind`, `kubectl`, `helm`, `tilt`, `direnv`, and
 `pre-commit`. `make preflight` reports on all of them, plus your git hooks and
 the Go tooling, and tells you what is missing.
 

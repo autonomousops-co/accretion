@@ -57,6 +57,19 @@ COLLECTOR_REDUNDANT := $(COLLECTOR_SCALED) --set dataCollector.kinds.trace.split
 # chart ships no per-environment files, so an operator deploying anything other
 # than the defaults passes their own -- COLLECTOR_VALUES="-f my-prod.yaml".
 COLLECTOR_VALUES ?=
+# A render-time database password for the gates, exactly parallel to the Redis
+# one in COLLECTOR_SCALED above and added for the same reason (#134): the three
+# charts that talk to Postgres used to ship `postgres` in their own values files
+# and now ship nothing, so they refuse to render with no password and no
+# existingSecret. Every gate that templates one of them for a reason unrelated
+# to credentials -- RBAC, sizing, trace scoping, PDBs -- has to supply one.
+#
+# It is a literal for the renderer, not a credential: nothing deploys it, and
+# the gates that DO assert something about the password's handling
+# (credential-plaintext-check, existing-secret-check) pass their own sentinel
+# and override this. Named so that a grep for it in a cluster finds nothing and
+# a reader who sees it in a diff does not go looking for where it is stored.
+DB_PASSWORD_RENDER := --set-string config.database.password=render-only-not-a-credential
 # Database TLS for the collector deploy path.
 #
 # charts/accretion-collector/values-{staging,prod}.yaml carried
@@ -280,7 +293,7 @@ deploy-collector-preflight: ## Validate the collector deploy inputs without depl
 # has no TLS.
 	@set -e; \
 	if [ -n "$(COLLECTOR_VALUES)" ]; then \
-		out=$$(helm template preflight ./charts/accretion-collector $(COLLECTOR_VALUES) 2>&1) || { \
+		out=$$(helm template preflight ./charts/accretion-collector $(DB_PASSWORD_RENDER) $(COLLECTOR_VALUES) 2>&1) || { \
 			printf "%b\n" "$(RED)COLLECTOR_VALUES does not render, so this deploy would fail after touching the cluster:$(NC)" >&2; \
 			printf "%s\n" "$$out" >&2; exit 1; }; \
 		mode=$$(printf "%s\n" "$$out" | grep -m1 "sslmode:" | sed "s/.*sslmode: *//;s/\"//g"); \
@@ -581,10 +594,10 @@ rbac-check: ## Verify no trace-receiving pod holds pods/log, and pods watch land
 	@printf "%b\n" "$(BLUE)Checking rendered collector RBAC (default install + every env)...$(NC)"
 	@bash -c 'set -eo pipefail; \
 		d=$$(mktemp -d); trap "rm -rf $$d" EXIT; \
-		helm template t ./charts/accretion-collector > $$d/default.yaml; \
-		helm template t ./charts/accretion-collector $(COLLECTOR_SCALED) > $$d/scaled.yaml; \
-		helm template t ./charts/accretion-collector --set statusCollector.kinds.configmap.enabled=false > $$d/no-configmap-kind.yaml; \
-		helm template t ./charts/accretion-collector --set dataCollector.kinds.trace.split=false \
+		helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) > $$d/default.yaml; \
+		helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) $(COLLECTOR_SCALED) > $$d/scaled.yaml; \
+		helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) --set statusCollector.kinds.configmap.enabled=false > $$d/no-configmap-kind.yaml; \
+		helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) --set dataCollector.kinds.trace.split=false \
 			--set dataCollector.kinds.log.split=true --set dataCollector.kinds.metric.split=true \
 			--set dataCollector.kinds.event.enabled=false > $$d/trace-alone.yaml; \
 		bash scripts/check-collector-rbac.sh $$d/default.yaml $$d/scaled.yaml \
@@ -601,7 +614,7 @@ rbac-check: ## Verify no trace-receiving pod holds pods/log, and pods watch land
 		printf "%b\n" "  ok  no-secrets assertion proven to fire (a role granting secrets is rejected by name)"; \
 		guard="the trace collector shares the data-collector process with"; \
 		for escape in "--set dataCollector.kinds.trace.split=false" "--set dataCollector.kinds.trace.split=false --set dataCollector.kinds.log.split=true"; do \
-			msg=$$(helm template t ./charts/accretion-collector $$escape 2>&1 >/dev/null || true); \
+			msg=$$(helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) $$escape 2>&1 >/dev/null || true); \
 			if printf "%s" "$$msg" | grep -q "$$guard"; then \
 				printf "%b\n" "  ok  guard proven to fire on [$$escape]"; \
 			else \
@@ -652,11 +665,11 @@ redis-check: ## Verify the standalone Redis caps its memory below its limit and 
 	@bash -c 'set -eo pipefail; \
 		d=$$(mktemp -d); trap "rm -rf $$d" EXIT; \
 		fail() { printf "%b\n" "$(RED)$$1$(NC)"; exit 1; }; \
-		helm template t ./charts/accretion-collector > $$d/default.yaml; \
+		helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) > $$d/default.yaml; \
 		! grep -q "image: redis:" $$d/default.yaml || fail "the default render deploys Redis; nothing is scaled out there"; \
 		printf "%b\n" "  ok  default render deploys no Redis"; \
 		for e in scaled; do \
-			helm template t ./charts/accretion-collector $(COLLECTOR_SCALED) > $$d/$$e.yaml; \
+			helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) $(COLLECTOR_SCALED) > $$d/$$e.yaml; \
 			grep -q "image: redis:" $$d/$$e.yaml || fail "$$e renders no Redis -- this check is vacuous"; \
 			max=$$(grep -A1 -- "- \"--maxmemory\"" $$d/$$e.yaml | tail -1 | sed "s/.*- \"//;s/\"//"); \
 			pol=$$(grep -A1 -- "- \"--maxmemory-policy\"" $$d/$$e.yaml | tail -1 | sed "s/.*- \"//;s/\"//"); \
@@ -687,7 +700,7 @@ the image default snapshots fork against the dataset and a failed BGSAVE stalls 
 			return 0; \
 		}; \
 		src="SOURCE-$$$$"; decoy="DECOY-$$$$"; \
-		helm template t ./charts/accretion-collector $(COLLECTOR_SCALED) \
+		helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) $(COLLECTOR_SCALED) \
 			--set-string redis.auth.password=$$src --set-string config.redis.password=$$decoy > $$d/split.yaml; \
 		read found tainted <<< "$$(awk -v decoy=$$decoy "/^---/{kind=\"\";name=\"\";next} /^kind: /{kind=\$$2} /^  name: /{if(name==\"\")name=\$$2} kind==\"Deployment\"&&name==\"t-redis-master\"{found=1;if(index(\$$0,decoy)>0)tainted=1} END{print (found?1:0), (tainted?1:0)}" $$d/split.yaml)"; \
 		[ "$$found" = "1" ] || fail "the -redis-master Deployment did not render -- this check is vacuous"; \
@@ -702,27 +715,27 @@ the image default snapshots fork against the dataset and a failed BGSAVE stalls 
 			fail "a redis.conf key diverged from redis.auth.password was not rejected -- the single-source-of-truth assertion is inert"; \
 		fi; \
 		printf "%b\n" "  ok  single-source-of-truth assertion proven to fire ($$msg)"; \
-		msg=$$(helm template t ./charts/accretion-collector $(COLLECTOR_SCALED) --set-string redis.auth.password= 2>&1 >/dev/null || true); \
+		msg=$$(helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) $(COLLECTOR_SCALED) --set-string redis.auth.password= 2>&1 >/dev/null || true); \
 		case "$$msg" in \
 			*"must be set"*) ;; \
 			*) fail "an empty redis.auth.password was not rejected -- an unauthenticated Redis is reachable and the guard is inert: $$msg" ;; \
 		esac; \
 		printf "%b\n" "  ok  empty redis.auth.password (an unauthenticated Redis) is rejected by name"; \
 		ctrlpw=$$(printf "a\x0bb"); \
-		msg=$$(helm template t ./charts/accretion-collector $(COLLECTOR_SCALED) --set-string redis.auth.password="$$ctrlpw" 2>&1 >/dev/null || true); \
+		msg=$$(helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) $(COLLECTOR_SCALED) --set-string redis.auth.password="$$ctrlpw" 2>&1 >/dev/null || true); \
 		case "$$msg" in \
 			*"printable ASCII"*) ;; \
 			*) fail "a redis.auth.password containing a control character (0x0B) was not rejected -- the guard is inert: $$msg" ;; \
 		esac; \
 		printf "%b\n" "  ok  redis.auth.password containing a control character (0x0B) is rejected by name"; \
 		nbsppw=$$(printf "a\xc2\xa0b"); \
-		msg=$$(helm template t ./charts/accretion-collector $(COLLECTOR_SCALED) --set-string redis.auth.password="$$nbsppw" 2>&1 >/dev/null || true); \
+		msg=$$(helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) $(COLLECTOR_SCALED) --set-string redis.auth.password="$$nbsppw" 2>&1 >/dev/null || true); \
 		case "$$msg" in \
 			*"printable ASCII"*) ;; \
 			*) fail "a redis.auth.password containing U+00A0 (non-breaking space) was not rejected -- a control-character-only rule would miss exactly this, and the guard is inert: $$msg" ;; \
 		esac; \
 		printf "%b\n" "  ok  redis.auth.password containing U+00A0 is rejected by name"; \
-		helm template t ./charts/accretion-collector $(COLLECTOR_SCALED) --set-string redis.auth.password="an-ordinary-password-&-with-punctuation" >/dev/null \
+		helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) $(COLLECTOR_SCALED) --set-string redis.auth.password="an-ordinary-password-&-with-punctuation" >/dev/null \
 			|| fail "an ordinary printable-ASCII redis.auth.password (including &) was rejected -- the input guard is over-broad"; \
 		printf "%b\n" "  ok  an ordinary printable-ASCII redis.auth.password, including one containing &, still renders"'
 	@printf "%b\n" "$(GREEN)Redis is capped below its limit, evicts nothing, snapshots nothing, and persists nothing$(NC)"
@@ -738,8 +751,8 @@ sizing-check: ## Verify the status collector renders a GOMEMLIMIT below its memo
 	@bash -c 'set -eo pipefail; \
 		d=$$(mktemp -d); trap "rm -rf $$d" EXIT; \
 		fail() { printf "%b\n" "$(RED)$$1$(NC)"; exit 1; }; \
-		helm template t ./charts/accretion-collector > $$d/default.yaml; \
-		helm template t ./charts/accretion-collector $(COLLECTOR_SCALED) > $$d/scaled.yaml; \
+		helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) > $$d/default.yaml; \
+		helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) $(COLLECTOR_SCALED) > $$d/scaled.yaml; \
 		for e in default scaled; do \
 			cap=$$(awk "/^kind: Deployment\$$/{k=1} k&&/^  name: .*-status-collector\$$/{t=1} t&&/name: GOMEMLIMIT/{g=1;next} g&&/value:/{gsub(/\"/,\"\",\$$2); print \$$2; exit} /^---/{k=0;t=0;g=0}" $$d/$$e.yaml); \
 			lim=$$(awk "/^kind: Deployment\$$/{k=1} k&&/^  name: .*-status-collector\$$/{t=1} t&&/limits:/{l=1} t&&l&&/memory:/{gsub(/\"/,\"\",\$$2); print \$$2; exit} /^---/{k=0;t=0;l=0}" $$d/$$e.yaml); \
@@ -884,10 +897,10 @@ existing-secret-check: ## Verify existingSecret is honored: the collector chart 
 		msg=$$(helm template t ./charts/accretion-collector --set config.database.existingSecret=x --set config.database.existingSecretKey= 2>&1 >/dev/null || true); \
 		case "$$msg" in *"existingSecretKey is empty"*) ;; *) fail "an existingSecret with a blanked-out existingSecretKey was not rejected -- the assert-the-key-name guard is inert: $$msg";; esac; \
 		printf "%b\n" "  ok  config.database.existingSecret with an empty existingSecretKey is rejected by name"; \
-		msg=$$(helm template t ./charts/accretion-collector $(COLLECTOR_SCALED) --set redis.auth.existingSecret=x --set redis.auth.existingSecretPasswordKey= 2>&1 >/dev/null || true); \
+		msg=$$(helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) $(COLLECTOR_SCALED) --set redis.auth.existingSecret=x --set redis.auth.existingSecretPasswordKey= 2>&1 >/dev/null || true); \
 		case "$$msg" in *"existingSecretPasswordKey is empty"*) ;; *) fail "an existingSecret with a blanked-out existingSecretPasswordKey was not rejected: $$msg";; esac; \
 		printf "%b\n" "  ok  redis.auth.existingSecret with an empty existingSecretPasswordKey is rejected by name"; \
-		msg=$$(helm template t ./charts/accretion-collector $(COLLECTOR_SCALED) --set redis.auth.existingSecret=x --set redis.auth.existingSecretConfKey= 2>&1 >/dev/null || true); \
+		msg=$$(helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) $(COLLECTOR_SCALED) --set redis.auth.existingSecret=x --set redis.auth.existingSecretConfKey= 2>&1 >/dev/null || true); \
 		case "$$msg" in *"existingSecretConfKey is empty"*) ;; *) fail "an existingSecret with a blanked-out existingSecretConfKey was not rejected: $$msg";; esac; \
 		printf "%b\n" "  ok  redis.auth.existingSecret with an empty existingSecretConfKey is rejected by name"'
 	@printf "%b\n" "$(GREEN)existingSecret is honored: the collector chart never sees, renders, or leaks the credential$(NC)"
@@ -931,8 +944,8 @@ rbac-secrets-check: ## Verify no ServiceAccount in any chart holds a verb on sec
 			--set-string config.database.password=x --set-string postgresql.auth.postgresPassword=x --set-json "$$apikeys"; \
 		render api-example ./charts/accretion-api -f charts/accretion-api/values-example.yaml \
 			--set-string config.database.password=x --set-string postgresql.auth.postgresPassword=x; \
-		render collector-default ./charts/accretion-collector; \
-		render collector-scaled ./charts/accretion-collector $(COLLECTOR_SCALED); \
+		render collector-default ./charts/accretion-collector $(DB_PASSWORD_RENDER); \
+		render collector-scaled ./charts/accretion-collector $(DB_PASSWORD_RENDER) $(COLLECTOR_SCALED); \
 		render discord-enabled ./charts/accretion-discord --set enabled=true --set-string secret.botToken=x --set rbac.create=true \
 			--set-json "rbac.rules=[{\"apiGroups\":[\"\"],\"resources\":[\"pods\"],\"verbs\":[\"get\",\"list\"]}]"; \
 		render otel-values ./charts/otel-collector -f charts/otel-collector/values.yaml; \
@@ -1118,23 +1131,76 @@ secrets-functional-check: ## Verify test-functional refuses to run without a rea
 secrets-identity-check: ## Verify each identity's hash is the digest of its plaintext in .env
 	@bash scripts/check-api-key-hashes.sh --selfcheck
 
-secrets-keys-check: ## Verify make-secret.sh emits exactly the Secret keys the chart reads
-	@echo "$(BLUE)Diffing script Secret keys against the chart's secretKeyRefs...$(NC)"
+# BOTH NEIGHBOURS of the `name:` line are scanned, not just the one above it
+# (#134). The env entries generated from the ConfigMap come out of `toYaml`,
+# which sorts map keys, so `key:` precedes `name:` there -- but the database
+# password's secretKeyRef is written by hand in templates/deployment.yaml with
+# `name:` first, and a -B1-only scan simply does not see it. Reading both sides
+# is what lets db-password be compared like every other key rather than being
+# the one key the gate is structurally blind to. Within a secretKeyRef block the
+# only lines adjacent to `name:` are `key:`, `name:` and `optional:`, so looking
+# both ways adds no false positives TODAY -- and `refs` does not trust that it
+# will stay true. It counts the `name: <secret>` lines and requires the
+# extraction to yield exactly that many keys, so a future hand-written block
+# with an `optional:` sitting between `name:` and `key:` fails the gate rather
+# than vanishing from it. A key only the chart reads, missed here, is a silent
+# pass and a pod that fails at rollout -- the very failure this gate exists to
+# prevent, arriving through the gate itself.
+#
+# TWO Secrets since #135. accretion-discord-secrets was previously beyond this
+# gate's reach for a real reason: the script emitted only one of its four keys,
+# and the other three arrived as plaintext `--set` flags out of the Tiltfile, so
+# there was no script-side list to diff against. Now that the script owns all
+# four, the same comparison applies -- exact in both directions, because a key
+# the bot reads and the script does not emit fails the pod at rollout, while a
+# key the script emits and nothing reads is dead weight that outlives whatever
+# removed its reader. The bot is rendered from the REAL deploy/tilt.yaml
+# subtree, read through `scripts/check-values-matrix.sh --print-subtree`, so the
+# values under test are the values that deploy. That mode exists because this
+# recipe first grew its own copy of that script's values_subtree_file -- same
+# synthetic chart, same toJson template, same sed -- and dropped the per-key
+# caching and the `local`-expansion note the original had learned. Two readers
+# of "one chart's subtree out of the central file" is the drift these gates
+# exist to prevent, so there is one, and that script's selfcheck already covers
+# it. The count-of-4 assertion is the other vacuity guard: a chart that stopped
+# reading a key would otherwise agree with a script that stopped emitting it.
+secrets-keys-check: ## Verify make-secret.sh emits exactly the Secret keys the charts read
+	@echo "$(BLUE)Diffing script Secret keys against the charts' secretKeyRefs...$(NC)"
 	@bash -c 'set -eo pipefail; \
 		d=$$(mktemp -d); trap "rm -rf $$d" EXIT; \
+		fail() { printf "%b\n" "$(RED)$$1$(NC)" >&2; exit 1; }; \
+		refs() { \
+			{ grep -B1 "name: $$2" "$$1"; grep -A1 "name: $$2" "$$1"; } \
+				| grep -oE "key: [a-z0-9-]+" | awk "{print \$$2}" > $$d/raw; \
+			want=$$(grep -c "name: $$2" "$$1" || true); \
+			got=$$(wc -l < $$d/raw | tr -d " "); \
+			[ "$$got" -eq "$$want" ] || fail "$$1 references $$2 $$want times but only $$got of those refs yielded a key. The extraction reads the line either side of name:, so a secretKeyRef whose key: sits further away (an optional: between them, say) is INVISIBLE to it -- and a key only the chart reads, missed here, is a silent pass and a pod that fails at rollout."; \
+			sort -u $$d/raw; \
+		}; \
 		bash scripts/make-secret.sh --print-keys | sort -u > $$d/script; \
 		helm template $(RELEASE_NAME) ./charts/accretion-api -f charts/accretion-api/values-dev.yaml \
 			--set-json "apiKeys=[{\"name\":\"ci\",\"hash\":\"$(ZERO_DIGEST)\",\"permissions\":[\"read:memory\"]}]" \
-			| grep -B1 "name: accretion-api-secrets" | grep -oE "key: [a-z0-9-]+" \
-			| awk "{print \$$2}" | sort -u > $$d/chart; \
+			> $$d/render.yaml; \
+		refs $$d/render.yaml accretion-api-secrets > $$d/chart; \
 		if ! diff -u $$d/chart $$d/script; then \
-			printf "%b\n" "$(RED)Secret key mismatch: < chart expects, > script emits$(NC)"; exit 1; \
+			fail "Secret key mismatch: < chart expects, > script emits"; \
 		fi; \
 		grep -oE "Secret key: [^[:space:]]+" env.example | awk "{print \$$3}" | sort -u > $$d/envexample; \
 		if ! diff -u $$d/script $$d/envexample; then \
-			printf "%b\n" "$(RED)env.example annotations drifted: < script emits, > env.example documents$(NC)"; exit 1; \
+			fail "env.example annotations drifted: < script emits, > env.example documents"; \
 		fi; \
-		printf "%b\n" "$(GREEN)Secret keys match the chart, and env.example documents them$(NC)"'
+		printf "%b\n" "  ok  accretion-api-secrets: $$(wc -l < $$d/script | tr -d " ") keys match the chart, and env.example documents them"; \
+		bash scripts/make-secret.sh --print-discord-keys | sort -u > $$d/dscript; \
+		bash scripts/check-values-matrix.sh --print-subtree deploy/tilt.yaml accretion-discord > $$d/dvalues.json; \
+		helm template accretion-discord ./charts/accretion-discord -f $$d/dvalues.json > $$d/discord.yaml; \
+		refs $$d/discord.yaml accretion-discord-secrets > $$d/dchart; \
+		if ! diff -u $$d/dchart $$d/dscript; then \
+			fail "accretion-discord-secrets key mismatch: < the bot reads, > the script emits"; \
+		fi; \
+		n=$$(wc -l < $$d/dchart | tr -d " "); \
+		[ "$$n" -eq 4 ] || fail "the bot reads $$n keys from accretion-discord-secrets, expected 4 (its own API key, the Discord token and the two model keys). A render that reads fewer is not proof of agreement, it is a chart that stopped asking."; \
+		printf "%b\n" "  ok  accretion-discord-secrets: the bot reads exactly the 4 keys the script emits"; \
+		printf "%b\n" "$(GREEN)Secret keys match the charts, and env.example documents them$(NC)"'
 
 # The declare -A regression (#54): macOS ships bash 3.2 as /bin/bash and Tilt
 # invokes the script as `bash scripts/make-secret.sh`, bypassing the shebang.
@@ -1152,18 +1218,50 @@ secrets-portability-check: ## Verify make-secret.sh runs under /bin/bash 3.2 (ma
 		printf "%b\n" "$(GREEN)make-secret.sh runs under /bin/bash $$(/bin/bash --version | head -1 | grep -oE "version [0-9.]+")$(NC)"'
 
 # The FOURTH copy of the .env -> Secret-key mapping lives in pulumi (#55), and
-# until now no gate covered it. SUBSET, not equality: pulumi also provisions
-# db-password, which make-secret.sh has no business emitting, so pulumi-only
-# keys are fine and only a key the script emits but pulumi lacks is drift. The
-# extracted list is asserted non-empty, so renaming the Go literal cannot make
-# this pass by matching nothing against nothing.
-secrets-pulumi-check: ## Verify pulumi's Secret provisions every key make-secret.sh emits
+# until now no gate covered it. SUBSET, not equality: pulumi provisions keys
+# that make-secret.sh has no business emitting, so pulumi-only keys are fine and
+# only a key the script emits but pulumi lacks is drift. The extracted list is
+# asserted non-empty, so renaming the Go literal cannot make this pass by
+# matching nothing against nothing.
+#
+# TWO extractions, not one, since #134 put db-password on both sides. secrets.go
+# writes most keys as quoted literals but names the database one through the
+# `config.DBPasswordKey` constant -- deliberately, because the charts' own
+# existingSecretKey values are built from the same constant and a literal here
+# could drift from them. A literal-only scan therefore reported pulumi as
+# missing a key it has provisioned all along. Identifier-keyed entries are
+# resolved through their string constant in pulumi/pkg/config, and an identifier
+# that resolves to NOTHING is a hard failure rather than a silently dropped row:
+# dropping it is exactly how this gate would go back to reporting a false
+# missing key, or worse, stop noticing a real one.
+# BOTH Secrets since #135. accretion-discord-secrets was explicitly out of this
+# gate's reach, and values.go said so in two parts: the script emitted none of
+# those keys, and the extraction above matches literal `"key": pulumi.String()`
+# pairs, which building a Secret from a []string does not produce. The first
+# half stopped being true when the script took ownership of the bot token and
+# the model keys, so the list is read from DiscordSecretKeys() directly -- its
+# string literals, plus the api-key-<identity> entry rebuilt the way
+# DiscordAPIKeySecretKey() builds it. That last bit is the one duplication here
+# and it is named: the "api-key-" prefix lives in that function too, and the two
+# must move together.
+secrets-pulumi-check: ## Verify pulumi provisions every Secret key make-secret.sh emits
 	@echo "$(BLUE)Diffing script Secret keys against pulumi's Secret...$(NC)"
 	@bash -c 'set -eo pipefail; \
 		d=$$(mktemp -d); trap "rm -rf $$d" EXIT; \
 		bash scripts/make-secret.sh --print-keys | sort -u > $$d/script; \
 		sed -nE "s/.*\"([a-z0-9-]+)\":[[:space:]]*pulumi\.String.*/\1/p" \
-			pulumi/pkg/kubernetes/secrets.go | sort -u > $$d/pulumi; \
+			pulumi/pkg/kubernetes/secrets.go > $$d/pulumi.raw; \
+		sed -nE "s/.*config\.([A-Za-z0-9_]+):[[:space:]]*pulumi\.String.*/\1/p" \
+			pulumi/pkg/kubernetes/secrets.go | sort -u > $$d/pulumi.idents; \
+		while read -r ident; do \
+			[ -n "$$ident" ] || continue; \
+			v=$$(sed -nE "s/^[[:space:]]*$$ident[[:space:]]*=[[:space:]]*\"([a-z0-9-]+)\".*/\1/p" pulumi/pkg/config/*.go | head -1); \
+			if [ -z "$$v" ]; then \
+				printf "%b\n" "$(RED)pulumi/pkg/kubernetes/secrets.go provisions config.$$ident, but no string constant of that name is declared in pulumi/pkg/config — this key cannot be compared, and dropping it would make the gate report a missing key that is not missing (or miss one that is)$(NC)"; exit 1; \
+			fi; \
+			printf "%s\n" "$$v" >> $$d/pulumi.raw; \
+		done < $$d/pulumi.idents; \
+		sort -u $$d/pulumi.raw > $$d/pulumi; \
 		if [ ! -s $$d/pulumi ]; then \
 			printf "%b\n" "$(RED)no Secret keys found in pulumi/pkg/kubernetes/secrets.go — this check would pass vacuously$(NC)"; exit 1; \
 		fi; \
@@ -1172,7 +1270,28 @@ secrets-pulumi-check: ## Verify pulumi's Secret provisions every key make-secret
 			printf "%b\n" "$(RED)pulumi/pkg/kubernetes/secrets.go is missing Secret keys make-secret.sh emits:$(NC)"; \
 			sed "s/^/  /" $$d/only; exit 1; \
 		fi; \
-		printf "%b\n" "$(GREEN)pulumi provisions all $$(wc -l < $$d/script | tr -d " ") script Secret keys$(NC)"'
+		printf "%b\n" "  ok  accretion-api-secrets: pulumi provisions all $$(wc -l < $$d/script | tr -d " ") script Secret keys"; \
+		bash scripts/make-secret.sh --print-discord-keys | sort -u > $$d/dscript; \
+		awk "/^func DiscordSecretKeys\(\)/,/^}/" pulumi/pkg/config/values.go > $$d/dk.go; \
+		sed -nE "s/^[[:space:]]*\"([a-z0-9-]+)\",?[[:space:]]*\$$/\1/p" $$d/dk.go > $$d/dpulumi.raw; \
+		if grep -q "DiscordAPIKeySecretKey()" $$d/dk.go; then \
+			id=$$(sed -nE "s/^[[:space:]]*DiscordIdentity[[:space:]]*=[[:space:]]*\"([a-z0-9-]+)\".*/\1/p" pulumi/pkg/config/values.go | head -1); \
+			if [ -z "$$id" ]; then \
+				printf "%b\n" "$(RED)DiscordSecretKeys() calls DiscordAPIKeySecretKey(), but no DiscordIdentity string constant is declared in pulumi/pkg/config/values.go, so that key cannot be resolved and would be silently dropped from this comparison$(NC)"; exit 1; \
+			fi; \
+			printf "api-key-%s\n" "$$id" >> $$d/dpulumi.raw; \
+		fi; \
+		sort -u $$d/dpulumi.raw > $$d/dpulumi; \
+		if [ ! -s $$d/dpulumi ]; then \
+			printf "%b\n" "$(RED)no Secret keys found in DiscordSecretKeys() — this half of the check would pass vacuously$(NC)"; exit 1; \
+		fi; \
+		comm -23 $$d/dscript $$d/dpulumi > $$d/donly; \
+		if [ -s $$d/donly ]; then \
+			printf "%b\n" "$(RED)pulumi/pkg/config/values.go DiscordSecretKeys() is missing keys make-secret.sh emits into accretion-discord-secrets:$(NC)"; \
+			sed "s/^/  /" $$d/donly; exit 1; \
+		fi; \
+		printf "%b\n" "  ok  accretion-discord-secrets: pulumi provisions all $$(wc -l < $$d/dscript | tr -d " ") script Secret keys"; \
+		printf "%b\n" "$(GREEN)pulumi provisions every Secret key make-secret.sh emits$(NC)"'
 
 # #56: .env is gitignored, so no diff, review, or acceptance gate can see a
 # developer's stale bare OPENAI_API_KEY / ANTHROPIC_API_KEY — a runtime warning
@@ -1180,12 +1299,25 @@ secrets-pulumi-check: ## Verify pulumi's Secret provisions every key make-secret
 # vacuously: the same env file with and without the stale line. Asserts the
 # warning names the replacement, goes to stderr, leaves the exit code at 0, and
 # never prints the value (a sentinel value must appear in neither stream).
+#
+# The value assertion is made TWICE, raw and base64-decoded, because --dry-run
+# prints a Secret manifest and every `data:` value in one is encoded. A plaintext
+# grep of that output cannot see a leaked credential at all -- it would be
+# looking for a string that is, by construction, never there -- so the claim
+# "never prints the value" read far more generally than what was tested. The
+# decode closes that: a stale name whose value reached the Secret is now caught
+# in the form it would actually appear in.
+#
+# The fixture carries ACCRETION_DATABASE_PASSWORD since #134 for the same reason
+# values-check's renders carry one: db-password joined the script's REQUIRED
+# list, and that check runs before the warning this gate is about, so a fixture
+# without it would exit 1 on a missing key and never reach the code under test.
 secrets-stale-check: ## Verify make-secret.sh warns about bare pre-rename LLM key names (#56)
 	@echo "$(BLUE)Checking the stale bare-env-name warning...$(NC)"
 	@bash -c 'set -eo pipefail; \
 		d=$$(mktemp -d); trap "rm -rf $$d" EXIT; \
 		sentinel=sk-DO-NOT-PRINT-$$RANDOM; \
-		printf "OAUTH_CLIENT_ID=id\nOAUTH_CLIENT_SECRET=s\nACCRETION_AUTH_ALLOWED_DOMAINS=example.com\nSESSION_KEY=%s\n" "$$(openssl rand -hex 32)" > $$d/clean; \
+		printf "OAUTH_CLIENT_ID=id\nOAUTH_CLIENT_SECRET=s\nACCRETION_AUTH_ALLOWED_DOMAINS=example.com\nACCRETION_DATABASE_PASSWORD=fixture-not-a-credential\nSESSION_KEY=%s\n" "$$(openssl rand -hex 32)" > $$d/clean; \
 		cp $$d/clean $$d/stale; \
 		printf "OPENAI_API_KEY=%s\nANTHROPIC_API_KEY=%s\n" "$$sentinel" "$$sentinel" >> $$d/stale; \
 		env -i PATH="$$PATH" /bin/bash scripts/make-secret.sh --env-file $$d/stale --dry-run >$$d/out 2>$$d/err; \
@@ -1197,6 +1329,11 @@ secrets-stale-check: ## Verify make-secret.sh warns about bare pre-rename LLM ke
 		done; \
 		if grep -q "$$sentinel" $$d/out $$d/err; then \
 			printf "%b\n" "$(RED)stale-name warning leaked the variable VALUE$(NC)"; exit 1; \
+		fi; \
+		awk "{ print }" $$d/out | sed -nE "s/^  [a-zA-Z0-9_.-]+: (.*)\$$/\1/p" | tr -d "\"" \
+			| while read -r b64; do printf "%s" "$$b64" | base64 -d 2>/dev/null || true; printf "\n"; done > $$d/decoded; \
+		if grep -q "$$sentinel" $$d/decoded; then \
+			printf "%b\n" "$(RED)a stale bare name reached the Secret: the sentinel is absent from the raw output but present once the data values are base64-DECODED. The plaintext grep above cannot see that, which is exactly the shape a leak would take in a manifest whose values are all encoded.$(NC)"; exit 1; \
 		fi; \
 		if grep -q "warning:" $$d/out; then \
 			printf "%b\n" "$(RED)warning went to stdout, which is the manifest$(NC)"; exit 1; \
@@ -1220,13 +1357,20 @@ secrets-stale-check: ## Verify make-secret.sh warns about bare pre-rename LLM ke
 # server then rejects it — the crashloop #64 exists to prevent. It must therefore
 # run under a UTF-8 locale: under LC_ALL=C the buggy version passes and the test
 # proves nothing, exactly like testing with `bash` instead of `/bin/bash`.
+# The fixtures carry ACCRETION_DATABASE_PASSWORD since #134, in the printf
+# FORMAT string rather than in $$w: db-password joined the script's REQUIRED
+# list and that check runs before the session-key guard, so a fixture without it
+# exits on a missing key and never reaches the code under test. $$w is a `%s`
+# argument, and an escape inside an argument is never interpreted -- putting the
+# line there writes a literal backslash-n into the env file, which parses as one
+# unusable variable name and leaves the whitelist unset too.
 secrets-strength-check: ## Verify make-secret.sh rejects a weak or non-hex session key (#64)
 	@echo "$(BLUE)Checking the session-key strength guard...$(NC)"
 	@bash -c 'set -eo pipefail; \
 		d=$$(mktemp -d); trap "rm -rf $$d" EXIT; \
 		w="ACCRETION_AUTH_ALLOWED_DOMAINS=example.com"; \
-		printf "OAUTH_CLIENT_ID=id\nOAUTH_CLIENT_SECRET=s\n%s\nSESSION_KEY=%s\n" "$$w" "$$(openssl rand -hex 16)" > $$d/weak; \
-		printf "OAUTH_CLIENT_ID=id\nOAUTH_CLIENT_SECRET=s\n%s\nSESSION_KEY=%s\n" "$$w" "$$(openssl rand -hex 32)" > $$d/good; \
+		printf "OAUTH_CLIENT_ID=id\nOAUTH_CLIENT_SECRET=s\nACCRETION_DATABASE_PASSWORD=fixture-not-a-credential\n%s\nSESSION_KEY=%s\n" "$$w" "$$(openssl rand -hex 16)" > $$d/weak; \
+		printf "OAUTH_CLIENT_ID=id\nOAUTH_CLIENT_SECRET=s\nACCRETION_DATABASE_PASSWORD=fixture-not-a-credential\n%s\nSESSION_KEY=%s\n" "$$w" "$$(openssl rand -hex 32)" > $$d/good; \
 		if out=$$(env -i PATH="$$PATH" /bin/bash scripts/make-secret.sh --env-file $$d/weak --dry-run 2>&1); then \
 			printf "%b\n" "$(RED)session-key guard is vacuous: a 16-byte key was accepted$(NC)"; exit 1; \
 		fi; \
@@ -1240,7 +1384,7 @@ secrets-strength-check: ## Verify make-secret.sh rejects a weak or non-hex sessi
 		env -i PATH="$$PATH" /bin/bash scripts/make-secret.sh --env-file $$d/good --dry-run \
 			| grep -q "^  session-key:" || { \
 			printf "%b\n" "$(RED)session-key guard rejects a valid 64-hex-char key$(NC)"; exit 1; }; \
-		printf "OAUTH_CLIENT_ID=id\nOAUTH_CLIENT_SECRET=s\n%s\nSESSION_KEY=%s\n" "$$w" "ÁBCDEF0000000000000000000000000000000000000000000000000000000000" > $$d/accented; \
+		printf "OAUTH_CLIENT_ID=id\nOAUTH_CLIENT_SECRET=s\nACCRETION_DATABASE_PASSWORD=fixture-not-a-credential\n%s\nSESSION_KEY=%s\n" "$$w" "ÁBCDEF0000000000000000000000000000000000000000000000000000000000" > $$d/accented; \
 		if env -i PATH="$$PATH" LC_ALL=en_US.UTF-8 /bin/bash scripts/make-secret.sh --env-file $$d/accented --dry-run >/dev/null 2>&1; then \
 			printf "%b\n" "$(RED)session-key guard accepts non-ASCII as hex: the hex class must be enumerated, not a locale-collated range$(NC)"; exit 1; \
 		fi; \
@@ -1501,11 +1645,11 @@ trace-ingest-check: ## Verify a scaled-out collector keeps redundant trace inges
 	@printf "%b\n" "$(BLUE)Checking rendered trace ingest and PodDisruptionBudgets...$(NC)"
 	@bash -c 'set -eo pipefail; \
 		d=$$(mktemp -d); trap "rm -rf $$d" EXIT; \
-		helm template t ./charts/accretion-collector > $$d/default.yaml; \
-		helm template t ./charts/accretion-collector $(COLLECTOR_REDUNDANT) > $$d/redundant.yaml; \
+		helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) > $$d/default.yaml; \
+		helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) $(COLLECTOR_REDUNDANT) > $$d/redundant.yaml; \
 		bash scripts/check-trace-ingest.sh $$d/default.yaml; \
 		bash scripts/check-trace-ingest.sh --redundant $$d/redundant.yaml; \
-		helm template t ./charts/accretion-collector --set dataCollector.podDisruptionBudget.enabled=true > $$d/blocking.yaml; \
+		helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) --set dataCollector.podDisruptionBudget.enabled=true > $$d/blocking.yaml; \
 		if bash scripts/check-trace-ingest.sh $$d/blocking.yaml >/dev/null 2>&1; then \
 			printf "%b\n" "$(RED)a PDB with minAvailable 1 over a one-replica Deployment passed -- the drain check is inert$(NC)"; exit 1; \
 		fi; \
@@ -1545,7 +1689,7 @@ traces-check: ## Verify the trace pipeline is scoped by pod identity, not by wha
 		grep -q "^ *num_traces:" $$d/otel.yaml || fail "tail_sampling has no num_traces cap"; \
 		grep -q "^ *memory_limiter:" $$d/otel.yaml || fail "no memory_limiter processor is defined"; \
 		printf "%b\n" "  ok  tail_sampling buffer capped and memory_limiter defined"; \
-		helm template t ./charts/accretion-collector --namespace accretion-core > $$d/coll.yaml; \
+		helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) --namespace accretion-core > $$d/coll.yaml; \
 		grep -A2 "^      traces:" $$d/coll.yaml | grep -q -- "- \"\*\"" \
 			|| fail "collector config does not scope traces with namespaces.traces.include=[*]"; \
 		grep -q "self_namespace: \"accretion-core\"" $$d/coll.yaml \
@@ -1574,6 +1718,14 @@ up: ## Create the Kind cluster, then start Tilt for local development
 # at all. The fixture below carries a plaintext `key` and nothing else, and the
 # failure must NAME forbidPlaintextAPIKeys, so an unrelated failure cannot stand
 # in for the guard firing.
+#
+# Which is why the renders here pass $(DB_PASSWORD_RENDER) since #134. The
+# database-password guard is unconditional now and validate-security.yaml runs
+# it BEFORE the identity guards, so a render with no password fails with the
+# database message -- and the "rejected, but not by forbidPlaintextAPIKeys"
+# branch would then fire on every run, turning this gate permanently red while
+# saying nothing at all about plaintext keys. Supplying a password is what keeps
+# each assertion about the guard it names.
 # Every case above passes $$guard explicitly, though, which proves the guard
 # WORKS but not that it is ON by default — flip values.yaml's own
 # forbidPlaintextAPIKeys back to false and every check above still passes,
@@ -1620,7 +1772,7 @@ values-check: ## Verify checked-in values ship no plaintext API keys and no unen
 	@bash -c 'set -eo pipefail; \
 		guard="--set security.forbidPlaintextAPIKeys=true"; \
 		stub="--set-json apiKeys=[{\"name\":\"ci\",\"hash\":\"$(ZERO_DIGEST)\",\"permissions\":[\"read:memory\"]}]"; \
-		helm template t ./charts/accretion-api -f charts/accretion-api/values.yaml $$guard $$stub >/dev/null; \
+		helm template t ./charts/accretion-api -f charts/accretion-api/values.yaml $$guard $$stub $(DB_PASSWORD_RENDER) >/dev/null; \
 		printf "%b\n" "  ok  charts/accretion-api/values.yaml"; \
 		helm template t ./charts/accretion-api -f charts/accretion-api/values-example.yaml $$guard >/dev/null; \
 		printf "%b\n" "  ok  charts/accretion-api/values-example.yaml (own apiKeys)"; \
@@ -1633,7 +1785,7 @@ values-check: ## Verify checked-in values ship no plaintext API keys and no unen
 		printf "%b\n" "  ok  charts/accretion-api/values-dev.yaml"; \
 		d=$$(mktemp -d); trap "rm -rf $$d" EXIT; \
 		printf "%s\n" "apiKeys:" "  - name: probe" "    key: \"plaintext-probe\"" "    permissions: [\"read:memory\"]" > $$d/plaintext.yaml; \
-		if out=$$(helm template t ./charts/accretion-api -f $$d/plaintext.yaml $$guard 2>&1); then \
+		if out=$$(helm template t ./charts/accretion-api -f $$d/plaintext.yaml $$guard $(DB_PASSWORD_RENDER) 2>&1); then \
 			printf "%b\n" "$(RED)a values file carrying a plaintext key rendered under the guard — this check is vacuous$(NC)"; exit 1; \
 		fi; \
 		case "$$out" in \
@@ -1645,13 +1797,13 @@ values-check: ## Verify checked-in values ship no plaintext API keys and no unen
 	@bash -c 'set -eo pipefail; \
 		plaintext="--set-json apiKeys=[{\"name\":\"ci\",\"key\":\"plaintext-probe\",\"permissions\":[\"read:memory\"]}]"; \
 		hashOnly="--set-json apiKeys=[{\"name\":\"ci\",\"hash\":\"$(ZERO_DIGEST)\",\"permissions\":[\"read:memory\"]}]"; \
-		if out=$$(helm template t ./charts/accretion-api $$plaintext 2>&1); then \
+		if out=$$(helm template t ./charts/accretion-api $$plaintext $(DB_PASSWORD_RENDER) 2>&1); then \
 			printf "%b\n" "$(RED)a plaintext apiKeys entry rendered with NO --set override — values.yaml no longer defaults forbidPlaintextAPIKeys to true$(NC)"; exit 1; \
 		fi; \
 		if ! printf "%s" "$$out" | grep -q "forbidPlaintextAPIKeys"; then \
 			printf "%b\n" "$(RED)the plaintext probe was rejected, but not by forbidPlaintextAPIKeys — an unrelated failure is masking whether the default guard even fired: $$out$(NC)"; exit 1; \
 		fi; \
-		helm template t ./charts/accretion-api $$hashOnly >/dev/null; \
+		helm template t ./charts/accretion-api $$hashOnly $(DB_PASSWORD_RENDER) >/dev/null; \
 		printf "%b\n" "  ok  values.yaml default (no override at all) rejects a plaintext key by name, and still renders a hash-only one"'
 	@printf "%b\n" "$(BLUE)Checking staging/prod database TLS...$(NC)"
 	@bash -c 'set -eo pipefail; \
@@ -1673,7 +1825,7 @@ values-check: ## Verify checked-in values ship no plaintext API keys and no unen
 			check_sslmodes "$$d/api-$$e.yaml" "$$e" || exit 1; \
 			mode=$$($(MAKE) -n deploy-collector STACK=$$e 2>/dev/null | sed -n "s/.*set-string config.database.sslmode=\([a-z-]*\).*/\1/p" | head -1); \
 			[ -n "$$mode" ] || { printf "%b\n" "$(RED)make deploy-collector STACK=$$e passes no sslmode at all — the setting the per-environment files used to carry is gone again$(NC)"; exit 1; }; \
-			helm template t ./charts/accretion-collector --set-string config.database.sslmode=$$mode > $$d/coll-$$e.yaml; \
+			helm template t ./charts/accretion-collector $(DB_PASSWORD_RENDER) --set-string config.database.sslmode=$$mode > $$d/coll-$$e.yaml; \
 			check_sslmodes "$$d/coll-$$e.yaml" "$$e" || exit 1; \
 			printf "%b\n" "  ok  $$e renders an encrypted sslmode in both charts (collector via the $$mode that deploy-collector passes)"; \
 		done; \

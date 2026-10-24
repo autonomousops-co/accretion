@@ -2,7 +2,7 @@ apiVersion: v2
 name: accretion-db
 description: PostgreSQL database and schema for Accretion platform
 type: application
-version: 1.0.0
+version: 1.1.2
 appVersion: "1.0.0"
 dependencies:
   - name: postgresql

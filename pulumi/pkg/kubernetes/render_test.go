@@ -46,7 +46,7 @@ func TestChartsRenderWithReleaseValues(t *testing.T) {
 		// rejected it -- on main too, so it predates sprint-12.
 		mustContain(t, rendered, "accretion-api:stable", "the per-stack image tag")
 		mustContain(t, rendered, testDigest, "the API-key digest, in the ConfigMap the server reads")
-		mustContain(t, rendered, `host: "accretion-api.dev"`, "the Ingress host from the stack's domain")
+		mustContain(t, rendered, `host: "example.com"`, "the Ingress host from the stack's domain")
 		// GCE resolves this annotation against the NAME of a reserved global
 		// address, not against an address literal.
 		mustContain(t, rendered, testStaticIPName, "the reserved static IP's name")

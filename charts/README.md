@@ -37,28 +37,50 @@ Cross-namespace wiring: workers and the API reach Postgres at
   `values-prod.yaml`, plus a standalone `values-example.yaml`). `accretion-collector`,
   `accretion-discord` and `accretion-db` ship none, so a bare `helm install` of one of them gets
   chart defaults and nothing else. The collector's and the bot's per-deploy settings live in the two
-  files above; `accretion-db` runs on chart defaults, and appears in `deploy/tilt.yaml` as an empty
-  subtree only so the key set still matches the chart set exactly. `otel-collector`'s
-  `values-minimal.yaml` is a profile, not an environment.
+  files above; `accretion-db` runs on chart defaults plus the two Secret names #134 gave it in
+  `deploy/tilt.yaml` (its subtree there was an empty map until then, carried only so the key set
+  still matches the chart set exactly). `otel-collector`'s `values-minimal.yaml` is a profile, not
+  an environment.
 - **None of `accretion-api`'s three environment files render standalone**, by design: all three
   declare `apiKeys: []` and the chart refuses to render an authenticated deployment with no
   identities, so each needs deploy-time `--set-json apiKeys=[...]` (hashes only —
   `security.forbidPlaintextAPIKeys` rejects a plaintext `key` anyway, since it defaults to `true`
   chart-wide; staging and prod also set it explicitly, redundantly and harmlessly, and dev inherits
-  it rather than opting out). **`values-prod.yaml` needs more than the identities**: it turns
-  `security.enforceStrongDbPassword` on, so it refuses to render again until the application
-  database password is a real one (`--set-string config.database.password=...`, or a
+  it rather than opting out). **`values-prod.yaml` and `values-staging.yaml` need more than the
+  identities**: since #134 the database-password guard is unconditional — it used to be opt-in via
+  `security.enforceStrongDbPassword`, which only prod turned on, so dev and staging rendered with a
+  checked-in `postgres` by design and that flag is now gone — so each refuses to render again until
+  the application database password is a real one (`--set-string config.database.password=...`, or a
   `config.database.existingSecret`), and a third time until `postgresql.auth.postgresPassword` is
-  too — that last only while the bundled PostgreSQL subchart is enabled, as that file leaves it, so
-  `--set postgresql.enabled=false` for an external database skips it. The three refusals are raised
-  one at a time and each names its own remedy, so supplying the identities alone gets you the next
-  error rather than a render. `values-example.yaml` is the exception and renders as-is: it carries
-  its own identity, whose all-zeros digest has no preimage, so an unmodified example install
+  too — that last only while the bundled PostgreSQL subchart is enabled, as those files leave it, so
+  `--set postgresql.enabled=false` for an external database skips it. The refusals are raised one at
+  a time and each names its own remedy, so supplying the identities alone gets you the next error
+  rather than a render. `values-dev.yaml` and `values-example.yaml` do render as-is, and not because
+  they carry a password: both name `config.database.existingSecret: accretion-api-secrets`, the
+  Secret [`scripts/make-secret.sh`](../scripts/make-secret.sh) builds from
+  `ACCRETION_DATABASE_PASSWORD` in your gitignored `.env`. `values-example.yaml` additionally
+  carries its own identity, whose all-zeros digest has no preimage, so an unmodified example install
   authenticates nobody.
-- Secrets (`ACCRETION_LLM_OPENAI_API_KEY`, `ACCRETION_LLM_ANTHROPIC_API_KEY`, Discord token, OAuth, session key) come from a
-  Kubernetes Secret (`accretion-api-secrets`), created by
+- Secrets (`ACCRETION_LLM_OPENAI_API_KEY`, `ACCRETION_LLM_ANTHROPIC_API_KEY`, Discord token, OAuth,
+  session key) come from a Kubernetes Secret (`accretion-api-secrets`), created by
   [`scripts/make-secret.sh`](../scripts/make-secret.sh) — the one mapping from `.env`'s SHELL_CASE
   names to the chart's dashed Secret keys.
+- **Supplying the password as a Helm value is the escape hatch, not the path.** Every guard below
+  points here rather than advertising it, because the three charts name one remedy and this file
+  carries the caveat once. `--set-string config.database.password=<value>` (and
+  `--set-string postgresql.auth.postgresPassword=<value>` for `accretion-db`) renders fine and puts
+  the value in your shell history and in the Helm release, where `helm get values` returns it in
+  cleartext to anyone who can reach the release — the same defect #135 removed from the Discord
+  bot's side. Use it for a throwaway render; use `existingSecret` for anything that runs.
+- **No chart carries a database password** (#134). Six checked-in values files shipped `postgres`
+  until then, so a default `helm install` stood up a database whose password is public knowledge;
+  `accretion-api`, `accretion-collector` and `accretion-db` now refuse to render with neither a
+  password nor an `existingSecret`, and none of them generates one. The single value is
+  `ACCRETION_DATABASE_PASSWORD` in your gitignored `.env`, and `make-secret.sh` publishes it as
+  `db-password` in `accretion-api-secrets` (read by `accretion-api` and every collector) and as
+  `db-password` + `postgres-password` in `accretion-db-secrets` in the `accretion-db` namespace
+  (read by the schema Job, the partition CronJob, and the Postgres server itself — a Secret does not
+  cross a namespace, so the same password is published in both).
 - **API-key plaintext is not a chart value at all.** `accretion-api`'s `apiKeys` list carries only
   each identity's SHA-256 `hash`, which the chart renders into `auth.api_key_identities` in the
   ConfigMap; the plaintext lives in your gitignored `.env`
@@ -75,10 +97,21 @@ Cross-namespace wiring: workers and the API reach Postgres at
   a plaintext `key`, which `security.forbidPlaintextAPIKeys` forbids by default, so no deploy path
   produces it. The `accretion-discord` chart's `api.secretName` default still names it; every deploy
   path overrides that to `accretion-discord-secrets` above.
+- **No secret reaches the Discord bot as a Helm value** (#135). `accretion-discord-secrets` carries
+  all four values the bot reads — `api-key-accretion-discord`, `discord-bot-token`,
+  `anthropic-api-key` and `openai-api-key` — and `make-secret.sh` builds every one of them from
+  `.env`, skipping any it does not set. The chart's own `secret.botToken` / `secret.anthropicApiKey`
+  / `secret.openaiApiKey` values still exist for a bare `helm install`, and no path here takes them:
+  both `deploy/tilt.yaml` and `deploy/pulumi.yaml` set `secret.create: false`, name that Secret, and
+  declare the two model-key env vars as `env` entries pointing at it (the chart wires those two
+  itself only when the plaintext is supplied as a value). The Tiltfile passed the token and the
+  Anthropic key as plaintext `--set` flags until #135, which put them in the Helm release where
+  `helm get values accretion-discord` returns them in cleartext.
 - The DB schema is delivered as a ConfigMap + Job; partitioning/retention is tunable under
   `partitionMaintenance` in `accretion-db/values.yaml`.
-- **`accretion-collector`'s database and Redis passwords default to chart-owned Secrets, built from
-  `config.database.password` / `redis.auth.password`** — fine for local dev, but even `--set-string
+- **`accretion-collector`'s database and Redis passwords render into chart-owned Secrets when you
+  supply them as `config.database.password` / `redis.auth.password`** — and neither has a default
+  any more, so that path means supplying a value, not inheriting one. Even `--set-string
   config.database.password=<value>` puts the value in shell history and in the Helm release Secret,
   where `helm get values` returns it in cleartext. **For production**, set `config.database.existingSecret`
   and/or `redis.auth.existingSecret` instead: the chart then renders no Secret of its own for that

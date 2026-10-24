@@ -69,12 +69,15 @@ func DiscordAPIKeySecretKey() string { return "api-key-" + DiscordIdentity }
 // both halves: secrets.go builds the Secret from it, and the render check
 // asserts the bot's manifests reference exactly these, in both directions.
 //
-// That render check is the ONLY gate on these keys. `make secrets-pulumi-check`
-// cannot cover them for two independent reasons: it compares
-// scripts/make-secret.sh against the accretion-api Secret and none of these is
-// a key that script emits, and its extraction matches literal
-// `"key": pulumi.String(...)` pairs, which building the Secret from this list
-// deliberately does not produce.
+// `make secrets-pulumi-check` covers these too since #135. It used to be unable
+// to, for two independent reasons: it compared scripts/make-secret.sh against
+// the accretion-api Secret and none of these was a key that script emitted, and
+// its extraction matched literal `"key": pulumi.String(...)` pairs, which
+// building the Secret from this list deliberately does not produce. The first
+// reason ended when #135 gave the script ownership of the bot token and the
+// model keys -- the Tiltfile had been passing them to Helm as plaintext --set,
+// which put them in the Helm release -- so the gate now reads this list
+// directly instead, and the render check below is no longer the only one.
 func DiscordSecretKeys() []string {
 	return []string{
 		"discord-bot-token",

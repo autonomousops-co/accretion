@@ -1,10 +1,8 @@
 package config
 
 import (
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -645,7 +643,10 @@ func setDefaults() {
 	viper.SetDefault("database.host", "localhost")
 	viper.SetDefault("database.port", 5432)
 	viper.SetDefault("database.user", "postgres")
-	viper.SetDefault("database.password", "postgres")
+	// No default for database.password (#129). A well-known default is a
+	// credential that works, so an install that forgot to set one connects
+	// silently instead of failing. Absent ACCRETION_DATABASE_PASSWORD the value
+	// stays empty and the connection fails loudly, which is the outcome we want.
 	viper.SetDefault("database.database", "accretion")
 	viper.SetDefault("database.sslmode", "disable")
 
@@ -780,16 +781,67 @@ func bindEnvVars() {
 	viper.BindEnv("api.insecure_skip_verify", "ACCRETION_API_INSECURE_SKIP_VERIFY")
 }
 
-func GenerateDefault(outputFile string) error {
-	// NewAuthManager rejects any session key that is not hex of at least 64
-	// characters (32 decoded bytes), so emit a real one — a generated config
-	// must be usable as-is. crypto/rand only: a predictable signing key would
-	// be worse than an invalid one, because it would work.
-	sessionKey := make([]byte, 32)
-	if _, err := rand.Read(sessionKey); err != nil {
-		return fmt.Errorf("generating session key: %w", err)
-	}
+// OmittedSecret names one secret GenerateDefault deliberately does not write,
+// and the environment variable that supplies it instead.
+type OmittedSecret struct {
+	// Key is the dotted config key left empty, e.g. "auth.session_key".
+	Key string
+	// EnvVar is the variable the value arrives in, e.g. "SESSION_KEY".
+	EnvVar string
+}
 
+// OmittedSecrets is every secret-bearing key GenerateDefault leaves empty. It
+// exists so `accretion generate config` can name the variables to set rather
+// than leaving the operator to discover them from a failed startup, and it
+// lives next to GenerateDefault because a list kept anywhere else drifts from
+// the struct literal it describes. TestGenerateDefaultOmitsSecrets walks the
+// generated YAML and fails if any key here comes out non-empty, so adding a
+// secret field to Config without adding it here is caught rather than shipped.
+var OmittedSecrets = []OmittedSecret{
+	{Key: "auth.session_key", EnvVar: "SESSION_KEY"},
+	{Key: "auth.oauth.client_secret", EnvVar: "OAUTH_CLIENT_SECRET"},
+	{Key: "database.password", EnvVar: "ACCRETION_DATABASE_PASSWORD"},
+	{Key: "llm.openai.api_key", EnvVar: "ACCRETION_LLM_OPENAI_API_KEY"},
+	{Key: "llm.anthropic.api_key", EnvVar: "ACCRETION_LLM_ANTHROPIC_API_KEY"},
+}
+
+// googleOAuthTokenURL is Google's public OAuth token endpoint, not a
+// credential. G101 flags it only because the name holding it contains "token".
+//
+// It is hoisted out of the OAuthConfig literal below because #nosec binds to
+// the ENCLOSING node: any annotation on that literal, whether blanket or
+// written on the TokenURL field line, silences G101 for the whole struct —
+// including a genuinely hardcoded ClientSecret added to it later. Measured in
+// situ, all three ways. Keeping the suppression out here preserves that
+// detection on the one struct in this file where a credential used to live.
+//
+// Do NOT move it back, and do not trust G101 as the only guard either: gosec
+// applies an entropy filter, so a low-entropy hardcoded secret
+// ("your-client-secret") is discarded before it is ever reported. That blind
+// spot is structural. TestGenerateDefaultOmitsSecrets is the stronger check —
+// it reads the generated YAML back and fails on any non-empty secret-named
+// field, whatever its entropy.
+const googleOAuthTokenURL = "https://oauth2.googleapis.com/token" // #nosec G101 -- public endpoint, not a credential
+
+// GenerateDefault writes a starting config to outputFile.
+//
+// It carries no secret (#129). Every key in OmittedSecrets is written empty and
+// sourced from the environment instead — the gitignored .env locally, a
+// Kubernetes Secret read through secretKeyRef in-cluster — because those binds
+// already exist, so this removes a second, weaker source rather than adding
+// work. #112 made exactly this move for the collector's rendered ConfigMap.
+//
+// Keeping secrets hidden outranks a config that runs unmodified: ease of use is
+// about non-secret configuration — ports, namespaces, providers, structure —
+// not a pre-populated credential. A file born with a live session signing key
+// is one `git add -A` away from being committed, and that key signs and
+// encrypts the OAuth session cookie, so leaking it is an auth bypass.
+//
+// Do NOT "fix" the empty session key with a fake or fixed placeholder. A
+// predictable signing key is worse than an absent one, because it would work.
+// Absent a key, NewAuthManager fails closed and names the variable to set,
+// which is the correct outcome, not a defect to paper over.
+func GenerateDefault(outputFile string) error {
 	cfg := &Config{
 		Server: ServerConfig{
 			Host: "0.0.0.0",
@@ -797,11 +849,12 @@ func GenerateDefault(outputFile string) error {
 		// API on, UI off: the default deployment is machine-facing.
 		API: APIConfig{Enabled: true, Port: 41337},
 		UI:  UIConfig{Enabled: false, Port: 8080},
+		// Password is deliberately absent; it arrives as
+		// ACCRETION_DATABASE_PASSWORD. See OmittedSecrets.
 		Database: DatabaseConfig{
 			Host:     "localhost",
 			Port:     5432,
 			User:     "postgres",
-			Password: "postgres",
 			Database: "accretion",
 			SSLMode:  "disable",
 		},
@@ -835,20 +888,20 @@ func GenerateDefault(outputFile string) error {
 			SampleRate:  1.0,
 			Insecure:    true,
 		},
-		// #nosec G101 -- the client id/secret below are placeholder defaults that
-		// fail closed; real values come from the environment or a Kubernetes Secret.
+		// ClientSecret and SessionKey are deliberately absent; they arrive as
+		// OAUTH_CLIENT_SECRET and SESSION_KEY. See OmittedSecrets. ClientID stays:
+		// an OAuth client id is visible in every browser redirect, so it is
+		// ordinary configuration, not a credential.
 		Auth: AuthConfig{
 			OAuth: OAuthConfig{
-				Provider:     "google",
-				ClientID:     "your-google-client-id",
-				ClientSecret: "your-google-client-secret",
-				RedirectURL:  "http://localhost:8080/auth/callback",
-				Scopes:       []string{"openid", "profile", "email"},
-				AuthURL:      "https://accounts.google.com/o/oauth2/auth",
-				TokenURL:     "https://oauth2.googleapis.com/token",
-				UserInfoURL:  "https://www.googleapis.com/oauth2/v2/userinfo",
+				Provider:    "google",
+				ClientID:    "your-google-client-id",
+				RedirectURL: "http://localhost:8080/auth/callback",
+				Scopes:      []string{"openid", "profile", "email"},
+				AuthURL:     "https://accounts.google.com/o/oauth2/auth",
+				TokenURL:    googleOAuthTokenURL,
+				UserInfoURL: "https://www.googleapis.com/oauth2/v2/userinfo",
 			},
-			SessionKey:     hex.EncodeToString(sessionKey),
 			CookieDomain:   "",
 			CookieSecure:   true,
 			AdminEmails:    []string{"admin@example.com"},
@@ -863,12 +916,14 @@ func GenerateDefault(outputFile string) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	// This file carries a live session signing key, so a world-readable copy
-	// hands anyone on the machine the ability to forge session cookies. Write it
-	// 0600 via a temp file in the same directory and rename into place: every
-	// failure before the rename leaves the target untouched with the temp file
-	// cleaned up, so there is no partial-secret state to reason about, and the
-	// rename replaces a pre-existing file's mode along with its contents.
+	// The file no longer leaves here secret-bearing, but it is the file an
+	// operator edits, and the first thing edited into a config is usually the
+	// value that did not come with it. Staying 0600 keeps that copy unreadable
+	// by other users on the machine rather than depending on them not doing it.
+	// Write it 0600 via a temp file in the same directory and rename into place:
+	// every failure before the rename leaves the target untouched with the temp
+	// file cleaned up, so there is no half-written config to reason about, and
+	// the rename replaces a pre-existing file's mode along with its contents.
 	tmp, err := os.CreateTemp(filepath.Dir(outputFile), ".accretion-config-*")
 	if err != nil {
 		return fmt.Errorf("creating temp config: %w", err)

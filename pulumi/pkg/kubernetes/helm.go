@@ -97,7 +97,7 @@ func accretionValues(
 	// One domain source. cfg.DNS.Domain is also what the DNS module provisions
 	// the managed zone from, so the zone, the Ingress hosts and the managed
 	// certificate cannot name different domains -- which is exactly how the
-	// charts came to say autonomousops.co while Pulumi said accretion-api.dev.
+	// charts and Pulumi once drifted onto two different ones.
 	domain := cfg.DNS.Domain
 	www := fmt.Sprintf("www.%s", domain)
 

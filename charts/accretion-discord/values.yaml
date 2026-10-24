@@ -5,8 +5,18 @@
 # for a bot that sits idle holding a Discord connection, and it needs a bot
 # token they may not have.
 #
-# To turn it on, it is one line:
-#   --set enabled=true --set secret.botToken=<your token>
+# To turn it on: --set enabled=true, plus a Secret holding the bot token.
+#
+#   --set enabled=true --set secret.create=false --set secret.name=<your Secret>
+#
+# NOT --set secret.botToken=<your token> (#135). A token passed as a value is a
+# token in the Helm release, and `helm get values accretion-discord` returns it
+# in cleartext to anyone who can reach the release. The secret.* value fields
+# below still exist for a bare install that has nowhere else to put them, and no
+# path in this repository takes them: deploy/tilt.yaml and deploy/pulumi.yaml
+# both set secret.create=false and point at accretion-discord-secrets, which
+# scripts/make-secret.sh builds from your gitignored .env. See the root README's
+# Discord section for the full command.
 #
 # BREAKING CHANGE for existing releases (chart 0.3.0, #106). A values file
 # written before this key existed cannot contain it, so `helm upgrade` with
@@ -132,13 +142,29 @@ discord:
   # DISCORD_BOT_TOKEN is required - set via secret
   guildID: ""  # Optional: restrict to a specific guild
 
-# Secret configuration
+# Secret configuration.
+#
+# `create: false` plus a `name` is the shape every deploy path in this
+# repository uses (#135): the Secret is provisioned out of band -- by
+# scripts/make-secret.sh from .env locally, by Pulumi in a cluster -- and the
+# chart only references it. The three value fields below are the OTHER shape,
+# where the chart builds its own Secret from plaintext Helm values, and each one
+# set here or passed with --set is readable afterwards through
+# `helm get values`. They remain for a bare `helm install` with nowhere else to
+# put a token; prefer the Secret.
+#
+# Note that the two model keys do more than fill a Secret: templates/deployment
+# wires ACCRETION_LLM_ANTHROPIC_API_KEY / ACCRETION_LLM_OPENAI_API_KEY only when
+# the corresponding value here is non-empty. Under `create: false` those env
+# vars are declared as ordinary `env` entries pointing at the external Secret
+# instead -- see deploy/tilt.yaml and deploy/pulumi.yaml, which both do exactly
+# that.
 secret:
   create: true
   name: ""  # Defaults to fullname-secret
-  botToken: ""  # Set this or use an existing secret
-  anthropicApiKey: ""  # Required when provider is "anthropic"
-  openaiApiKey: ""  # Required for embeddings when provider is "anthropic"
+  botToken: ""  # PLAINTEXT, enters the Helm release. Prefer create:false + name.
+  anthropicApiKey: ""  # Same. Required when provider is "anthropic".
+  openaiApiKey: ""  # Same. Required for embeddings when provider is "anthropic".
 
 # RBAC settings (bot does not use the K8s API)
 rbac:

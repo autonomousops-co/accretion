@@ -23,7 +23,16 @@ config:
     host: "accretion-db-postgresql.accretion-db.svc.cluster.local"
     port: 5432
     user: "postgres"
-    password: "postgres"
+    # No password here (#134) — this file is the one a stranger copies, so a
+    # working credential in it is a working credential in every install derived
+    # from it. The password comes from a Secret you create before installing:
+    #
+    #   ACCRETION_DATABASE_PASSWORD=... in .env, then scripts/make-secret.sh
+    #
+    # which publishes it into accretion-api-secrets under db-password, the key
+    # named below. With existingSecret set the chart creates no Secret of its
+    # own and never sees config.database.password.
+    existingSecret: "accretion-api-secrets"
     database: "accretion"
     sslmode: "disable"
 
@@ -69,11 +78,17 @@ apiKeys:
     permissions: ["read:memory", "chat:query"]
 
 # PostgreSQL dependency configuration
+# NOT a database (#134 review). This chart declares no `dependencies:` — there
+# is no charts/ directory and no Chart.lock — so nothing here deploys
+# PostgreSQL; the database is the accretion-db release, which owns its own
+# superuser password and guards it in its own templates/_validation.tpl.
+#
+# What is left is read by exactly one template, pvc-creation-hook.yaml, which
+# pre-creates a PVC named for a StatefulSet this chart does not create either.
+# That is a separate pre-existing defect; these keys stay until it is addressed
+# so the rendered objects do not change here.
 postgresql:
   enabled: true
-  auth:
-    postgresPassword: "postgres"
-    database: "accretion"
   image:
     registry: docker.io
     repository: pgvector/pgvector

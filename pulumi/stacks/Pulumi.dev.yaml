@@ -1,16 +1,36 @@
+# REPLACE THE TWO VALUES MARKED "REPLACE" BELOW BEFORE DEPLOYING THIS STACK
+# (#128). The rest of the file works as shipped.
+#
+# gcp:project must be a GCP project you own. Project IDs are globally unique, so
+# the placeholder belongs to nobody and Pulumi fails on its first API call until
+# you substitute it -- it cannot quietly deploy somewhere unintended.
+#
+# clusterName is the GKE cluster this stack creates in that project. The name
+# below is generic and valid; rename it if you prefer, but nothing breaks if you
+# do not.
+#
+# domain is RFC 2606 reserved, which nobody can register, so the stack previews
+# and validates but serves nothing until you put your own domain in. It is the
+# single source for three things at once -- the managed DNS zone, the Ingress
+# hosts, and the managed certificate's domains -- so changing it here changes all
+# three together, which is what stops them naming different domains.
+#
+# Everything below those three is deployment sizing rather than identity: region,
+# zone, machineType, the node counts, diskSizeGb and the db* tiers are yours to
+# keep or tune.
 config:
-  gcp:project: accretion-api-dev
+  gcp:project: your-gcp-project-dev  # REPLACE: a GCP project you own
   gcp:region: us-central1
   gcp:zone: us-central1-a
   accretion-infrastructure:environment: dev
-  accretion-infrastructure:clusterName: accretion-api-dev
+  accretion-infrastructure:clusterName: accretion-dev
   accretion-infrastructure:namespace: accretion-core
   accretion-infrastructure:machineType: e2-medium
   accretion-infrastructure:nodeCount: 1
   accretion-infrastructure:minNodes: 1
   accretion-infrastructure:maxNodes: 3
   accretion-infrastructure:diskSizeGb: "50"
-  accretion-infrastructure:domain: dev.accretion-api.dev
+  accretion-infrastructure:domain: dev.example.com  # REPLACE: your own domain
   accretion-infrastructure:enableCollector: "true"
   accretion-infrastructure:imageTag: latest
   accretion-infrastructure:dbInstanceTier: db-f1-micro

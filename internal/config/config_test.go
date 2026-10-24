@@ -2,7 +2,6 @@ package config
 
 import (
 	"crypto/tls"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -66,6 +65,13 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Database.Database != "accretion" {
 		t.Errorf("Expected database name 'accretion', got '%s'", cfg.Database.Database)
+	}
+	// There is deliberately no default password (#129). A well-known one is a
+	// credential that works, so an install that set none would connect silently
+	// instead of failing where someone can see it.
+	if cfg.Database.Password != "" {
+		t.Errorf("Expected no default database password, got %q; it must come from ACCRETION_DATABASE_PASSWORD",
+			cfg.Database.Password)
 	}
 
 	// Test LLM defaults
@@ -879,10 +885,27 @@ func TestCollectorSecretsRequireExplicitBind(t *testing.T) {
 	})
 }
 
-// generateDefaultSessionKey runs GenerateDefault into a temp file and returns the
-// session key from the config it wrote.
-func generateDefaultSessionKey(t *testing.T) string {
-	t.Helper()
+// TestGenerateDefaultOmitsSecrets asserts the generated config carries no
+// non-empty secret (#129). It walks the YAML actually written rather than
+// inspecting the Config struct, because the file is what gets committed by
+// accident.
+//
+// It asserts twice, because the two checks fail on different mistakes:
+//
+//   - Every key in OmittedSecrets resolves, and comes out empty. This ties the
+//     list `accretion generate config` prints to what the file actually
+//     contains, so a key listed as omitted but left populated fails here, and
+//     so does a misspelled one that describes no field at all.
+//   - No key anywhere in the tree that credentialField calls a credential is a
+//     non-empty string. The first check cannot see a secret nobody remembered
+//     to list, and a list is exactly the thing that gets forgotten when a field
+//     is added, so this one is driven off the generated YAML instead.
+//
+// Empty is the bar, not absent: none of these fields carry omitempty, so
+// `session_key: ""` is what a secret-free config looks like. A present-but-blank
+// value is not a credential, and env beats config in viper's precedence, so it
+// cannot shadow the variable that supplies the real one.
+func TestGenerateDefaultOmitsSecrets(t *testing.T) {
 	outputFile := filepath.Join(t.TempDir(), "default-config.yaml")
 	if err := GenerateDefault(outputFile); err != nil {
 		t.Fatalf("GenerateDefault failed: %v", err)
@@ -891,50 +914,134 @@ func generateDefaultSessionKey(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("Failed to read generated config file: %v", err)
 	}
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+
+	var tree map[string]interface{}
+	if err := yaml.Unmarshal(data, &tree); err != nil {
 		t.Fatalf("Failed to unmarshal generated config: %v", err)
 	}
-	return cfg.Auth.SessionKey
+
+	if len(OmittedSecrets) == 0 {
+		t.Fatal("OmittedSecrets is empty, so this test would assert nothing")
+	}
+	for _, secret := range OmittedSecrets {
+		value, found := lookupYAMLPath(tree, strings.Split(secret.Key, "."))
+		if !found {
+			// A key that does not resolve is a typo, not a stricter omission. No
+			// field in Config carries omitempty, so every real key is present and
+			// empty; a misspelled one would otherwise assert nothing here while
+			// `accretion generate config` went on printing it as the name of a
+			// value the operator should set.
+			t.Errorf("OmittedSecrets names %q, which does not exist in the generated config. "+
+				"Fix the key or drop the entry; `generate config` prints it as the source of %s.",
+				secret.Key, secret.EnvVar)
+			continue
+		}
+		if s, ok := value.(string); !ok || s != "" {
+			t.Errorf("Generated config has %s = %#v, want empty; it is supplied by %s",
+				secret.Key, value, secret.EnvVar)
+		}
+	}
+
+	for _, found := range scanYAMLForSecrets(tree, nil) {
+		t.Errorf("Generated config has %s = %q, want empty: a key named like a secret must not carry a "+
+			"value. Leave it empty in GenerateDefault and add it to OmittedSecrets so `generate config` "+
+			"names the variable that supplies it.", found.key, found.value)
+	}
 }
 
-// TestGenerateDefaultSessionKeyIsUsable round-trips the generated session key
-// through the same decode-and-length check NewAuthManager applies (hex only, at
-// least 64 hex characters / 32 decoded bytes — see auth.go, the authority; this
-// test restates the bound because internal/auth imports internal/config, so a
-// package-internal test cannot import auth to call NewAuthManager). Comparing against a literal would
-// pass forever while the value stayed unusable, which is exactly how the
-// "your-session-key-32-chars-long" placeholder survived.
-func TestGenerateDefaultSessionKeyIsUsable(t *testing.T) {
-	key := generateDefaultSessionKey(t)
-
-	decoded, err := hex.DecodeString(key)
-	if err != nil {
-		t.Fatalf("Generated session key is not hex-encoded: %v (key=%q)", err, key)
-	}
-	if len(decoded) < 32 {
-		t.Errorf("Generated session key decodes to %d bytes, need at least 32 (64 hex characters); key=%q", len(decoded), key)
-	}
-	if len(key) < 64 {
-		t.Errorf("Generated session key is %d hex characters, need at least 64", len(key))
-	}
+// secretFinding is one non-empty secret-looking value found in a YAML tree.
+type secretFinding struct {
+	key   string // dotted path, e.g. "auth.session_key"
+	value string
 }
 
-// TestGenerateDefaultSessionKeyIsFresh asserts successive calls produce different
-// keys, which catches a hardcoded constant that happens to be valid hex.
-func TestGenerateDefaultSessionKeyIsFresh(t *testing.T) {
-	first := generateDefaultSessionKey(t)
-	second := generateDefaultSessionKey(t)
+// scanYAMLForSecrets walks every mapping in a decoded YAML tree and reports the
+// non-empty string leaves whose key name denotes a credential. prefix is the
+// dotted path of the node being walked; pass nil at the root.
+//
+// The "is this a secret?" rule is credentialField from sanitize_test.go — the
+// same package, and already the repository's answer to that question. A second
+// list here would be a second policy: two definitions of what counts as a
+// credential, drifting apart, with this one the weaker of the two. It misses
+// the bare `key` shape that credentialField carries deliberately, which is not
+// hypothetical — APIClientConfig.Key is the field whose omission from
+// DiscordConfig.Sanitize printed the bot's API key to its pod log on every
+// restart.
+//
+// Two gaps are known and shared with credentialField, left there on purpose.
+// A name that denotes a credential without matching a needle (`dsn`, a
+// connection string) is not caught, and neither is a non-string value — a
+// secret stored as a number or a list walks past. Widening the needles costs
+// false positives on a check whose whole value is that it is never switched
+// off; when a config grows a field of either shape, the fix belongs in
+// credentialField so both tests gain it at once.
+func scanYAMLForSecrets(node interface{}, prefix []string) []secretFinding {
+	var findings []secretFinding
 
-	if first == second {
-		t.Errorf("Two GenerateDefault calls produced the same session key %q; it must be generated per invocation", first)
+	visit := func(name string, child interface{}) {
+		path := append(append([]string{}, prefix...), name)
+		if s, ok := child.(string); ok {
+			if s != "" && credentialField(name) {
+				findings = append(findings, secretFinding{key: strings.Join(path, "."), value: s})
+			}
+			return
+		}
+		findings = append(findings, scanYAMLForSecrets(child, path)...)
 	}
+
+	// yaml.v2 decodes nested mappings as map[interface{}]interface{}; only the
+	// value unmarshalled into at the root is map[string]interface{}.
+	switch m := node.(type) {
+	case map[string]interface{}:
+		for name, child := range m {
+			visit(name, child)
+		}
+	case map[interface{}]interface{}:
+		for name, child := range m {
+			key, ok := name.(string)
+			if !ok {
+				continue
+			}
+			visit(key, child)
+		}
+	case []interface{}:
+		for i, child := range m {
+			findings = append(findings, scanYAMLForSecrets(child, append(append([]string{}, prefix...), fmt.Sprintf("[%d]", i)))...)
+		}
+	}
+	return findings
+}
+
+// lookupYAMLPath walks a dotted config key through a decoded YAML tree. yaml.v2
+// decodes nested mappings as map[interface{}]interface{} rather than
+// map[string]interface{}, so both shapes are handled.
+func lookupYAMLPath(tree map[string]interface{}, path []string) (interface{}, bool) {
+	var node interface{} = tree
+	for _, segment := range path {
+		switch m := node.(type) {
+		case map[string]interface{}:
+			child, ok := m[segment]
+			if !ok {
+				return nil, false
+			}
+			node = child
+		case map[interface{}]interface{}:
+			child, ok := m[segment]
+			if !ok {
+				return nil, false
+			}
+			node = child
+		default:
+			return nil, false
+		}
+	}
+	return node, true
 }
 
 // TestGenerateDefaultFileIsNotWorldReadable checks the mode of the file actually
-// written, not the constant in the source. The generated config carries a live
-// session signing key, so any group or other permission bit lets another user on
-// the machine read it and forge session cookies.
+// written, not the constant in the source. The generated config no longer leaves
+// here secret-bearing, but it is the file an operator pastes a real value into,
+// so it stays unreadable by other users on the machine.
 func TestGenerateDefaultFileIsNotWorldReadable(t *testing.T) {
 	outputFile := filepath.Join(t.TempDir(), "default-config.yaml")
 	if err := GenerateDefault(outputFile); err != nil {
