@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.4
 
 # Build stage with comprehensive caching
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26.10-alpine AS builder
 
 WORKDIR /app
 
