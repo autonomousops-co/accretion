@@ -797,6 +797,7 @@ type OmittedSecret struct {
 // the struct literal it describes. TestGenerateDefaultOmitsSecrets walks the
 // generated YAML and fails if any key here comes out non-empty, so adding a
 // secret field to Config without adding it here is caught rather than shipped.
+// Keep in sync with Config.Sanitize.
 var OmittedSecrets = []OmittedSecret{
 	{Key: "auth.session_key", EnvVar: "SESSION_KEY"},
 	{Key: "auth.oauth.client_secret", EnvVar: "OAUTH_CLIENT_SECRET"},
@@ -957,6 +958,7 @@ const sanitizedValue = "***"
 // Sanitize returns a copy of the config with sensitive fields masked
 func (c *Config) Sanitize() Config {
 	sanitized := *c
+	// Keep in sync with OmittedSecrets.
 	sanitized.Database.Password = sanitizedValue
 	sanitized.LLM.OpenAI.APIKey = sanitizedValue
 	sanitized.LLM.Anthropic.APIKey = sanitizedValue
