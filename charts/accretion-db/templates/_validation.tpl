@@ -32,6 +32,30 @@ of the old values file walk straight back in.
 {{- if and (eq $adminExisting "") (or (eq $adminPw "") (eq $adminPw "postgres")) }}
 {{- fail "SECURITY: no PostgreSQL superuser password. postgresql.auth.postgresPassword is empty or the insecure default \"postgres\" and postgresql.auth.existingSecret is not set, and the Bitnami subchart would GENERATE a random one that none of this platform's clients hold. Set postgresql.auth.existingSecret to a Secret carrying the password under postgres-password -- scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD from your gitignored .env into accretion-db-secrets under exactly that key (see env.example). charts/README.md documents the --set-string escape hatch and why a password passed as a Helm value is readable afterwards with `helm get values`." }}
 {{- end }}
+{{/*
+Single-source cross-check (#143). values.yaml promises "one variable feeds both
+sides and they cannot disagree" -- the Postgres superuser (postgresql.auth) and
+the schema job + partition cronjob (config.database). The two guards above each
+check only their OWN side, so a MIXED shape -- an existingSecret on one side and a
+literal on the other -- satisfies both independently while the two halves point at
+different passwords. The server then comes up on one password and the jobs
+authenticate with another, and nothing in any rendered manifest says why: each
+value is individually valid, only their disagreement is wrong. Refuse it here, by
+name. The two coherent shapes -- BOTH an existingSecret, or BOTH a literal -- pass;
+this rejects only the disagreement between them. (Two different existingSecret
+NAMES cannot be compared without cluster access, the same limit the existingSecret
+guards note.)
+*/}}
+{{- $jobsExisting := .Values.config.database.existingSecret | default "" }}
+{{- $adminUsesSecret := ne $adminExisting "" }}
+{{- $jobsUsesSecret := ne $jobsExisting "" }}
+{{- if ne $adminUsesSecret $jobsUsesSecret }}
+{{- if $adminUsesSecret }}
+{{- fail "SECURITY: mixed database password sources (#143). postgresql.auth.existingSecret is set, so the Postgres superuser is read from that Secret, while config.database.password is a literal that the schema job and the partition-maintenance cronjob use -- so the server and the jobs can hold DIFFERENT passwords, which values.yaml promises is impossible and the schema job fails authentication on at rollout. Point config.database.existingSecret at the SAME Secret (scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD under both postgres-password and db-password so one value feeds both), or supply both sides as literals -- do not mix a Secret with a literal." }}
+{{- else }}
+{{- fail "SECURITY: mixed database password sources (#143). config.database.existingSecret is set, so the schema job and the partition-maintenance cronjob read the password from that Secret, while postgresql.auth.postgresPassword is a literal that the Postgres superuser is initialised from -- so the server and the jobs can hold DIFFERENT passwords, which values.yaml promises is impossible and the schema job fails authentication on at rollout. Point postgresql.auth.existingSecret at the SAME Secret, or supply both sides as literals -- do not mix a Secret with a literal." }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- $existing := .Values.config.database.existingSecret | default "" }}
 {{- if eq $existing "" }}

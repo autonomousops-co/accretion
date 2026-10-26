@@ -250,6 +250,21 @@ accretion-discord:
 # (a Secret does not cross one, so the same password is published there as well
 # as into accretion-core) carrying BOTH keys named below: postgres-password for
 # the subchart, db-password for this chart's own jobs.
+#
+# BREAKING CHANGE for existing releases (#145, companion to #134). PostgreSQL
+# honours POSTGRES_PASSWORD only on FIRST initialisation, so on any cluster whose
+# Postgres PVC already exists this existingSecret is a breaking change: tilt up
+# injects the .env password from accretion-db-secrets, but the data directory
+# still holds the OLD superuser password, and accretion-api, both collectors and
+# the schema Job all fail authentication. A kind cluster first brought up before
+# #134 (PVC initialised with `postgres`) hits exactly this. Two remedies, either
+# works:
+#   - set ACCRETION_DATABASE_PASSWORD=postgres in your .env for continuity, so
+#     the new Secret carries the password the volume was initialised with; or
+#   - recreate the volume with the `reset-database` Tilt resource, which drops
+#     the PVC and reinitialises Postgres from the new Secret (it now validates
+#     the render BEFORE deleting anything, so a bad config cannot wipe the volume
+#     and then fail -- see Tiltfile).
 accretion-db:
   postgresql:
     auth:

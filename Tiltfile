@@ -634,9 +634,17 @@ local_resource(
 
 # Manual triggers for common tasks
 
+# The database password is not in the chart (#134); it comes from the accretion-db
+# subtree in deploy/tilt.yaml, the same --values the accretion-db helm_resource
+# above passes. Without it the chart refuses to render -- and this resource used to
+# omit it, so `helm upgrade --install` failed AFTER the PVC was already deleted and
+# the StatefulSet scaled back up, leaving the release pointing at a wiped volume
+# (#144). So the render is VALIDATED first, before anything destructive runs: a
+# `helm template` that cannot render aborts the whole chain (&&) while the data is
+# still intact, and the final `helm upgrade --install` carries the same --values.
 local_resource(
     'reset-database',
-    cmd='kubectl scale statefulset -l app.kubernetes.io/name=postgresql -n ' + db_namespace + ' --replicas=0 && kubectl wait --for=delete pod -l app.kubernetes.io/name=postgresql -n ' + db_namespace + ' --timeout=60s; kubectl delete pvc -l app.kubernetes.io/name=postgresql -n ' + db_namespace + ' && kubectl scale statefulset -l app.kubernetes.io/name=postgresql -n ' + db_namespace + ' --replicas=1 && kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=postgresql -n ' + db_namespace + ' --timeout=120s && kubectl delete job accretion-db-schema -n ' + db_namespace + ' --ignore-not-found && helm upgrade --install accretion-db ./charts/accretion-db --namespace ' + db_namespace + ' && kubectl wait --for=condition=complete job/accretion-db-schema -n ' + db_namespace + ' --timeout=120s',
+    cmd='helm template accretion-db ./charts/accretion-db --values ' + chart_values['accretion-db'] + ' >/dev/null && kubectl scale statefulset -l app.kubernetes.io/name=postgresql -n ' + db_namespace + ' --replicas=0 && kubectl wait --for=delete pod -l app.kubernetes.io/name=postgresql -n ' + db_namespace + ' --timeout=60s; kubectl delete pvc -l app.kubernetes.io/name=postgresql -n ' + db_namespace + ' && kubectl scale statefulset -l app.kubernetes.io/name=postgresql -n ' + db_namespace + ' --replicas=1 && kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=postgresql -n ' + db_namespace + ' --timeout=120s && kubectl delete job accretion-db-schema -n ' + db_namespace + ' --ignore-not-found && helm upgrade --install accretion-db ./charts/accretion-db --namespace ' + db_namespace + ' --values ' + chart_values['accretion-db'] + ' && kubectl wait --for=condition=complete job/accretion-db-schema -n ' + db_namespace + ' --timeout=120s',
     labels=['tools'],
     auto_init=False,
     trigger_mode=TRIGGER_MODE_MANUAL,

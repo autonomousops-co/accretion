@@ -261,6 +261,7 @@ while [ $# -gt 0 ]; do
     --dry-run)      MODE="print"; shift ;;
     --print-keys)   MODE="keys"; shift ;;
     --print-discord-keys) MODE="discord-keys"; shift ;;
+    --print-db-keys) MODE="db-keys"; shift ;;
     --print-identities) MODE="identities"; shift ;;
     --print-identity-var) MODE="identity-var"; IDENTITY_ARG="$2"; shift 2 ;;
     -h|--help)      usage; exit 0 ;;
@@ -284,6 +285,19 @@ fi
 if [ "$MODE" = "discord-keys" ]; then
   printf '%s\n' "api-key-${DISCORD_IDENTITY}"
   for entry in "${DISCORD_MAPPINGS[@]}"; do printf '%s\n' "${entry%%:*}"; done
+  exit 0
+fi
+
+# --print-db-keys: the key NAMES this script puts in accretion-db-secrets, and
+# nothing else -- the fourth Secret the script owns and, until #147, the only one
+# whose keys no gate checked in either direction. Like --print-keys it reads no
+# value, so it is safe to run in a shell holding real credentials.
+# `make secrets-db-keys-check` diffs these against the keys the accretion-db
+# chart's rendered secretKeyRefs ask for, deploy/tilt.yaml's existingSecretKey,
+# and the Bitnami subchart's auth.secretKeys.adminPasswordKey -- the same
+# boundaries the other two --print-*-keys modes already police.
+if [ "$MODE" = "db-keys" ]; then
+  printf '%s\n' "$DB_PASSWORD_KEY" "$DB_ADMIN_PASSWORD_KEY"
   exit 0
 fi
 
@@ -616,18 +630,35 @@ manifest="$(kubectl create secret generic "$SECRET_NAME" \
 # jobs ending up with different passwords -- the failure the chart used to
 # avoid by hardcoding "postgres" on both sides.
 #
-# Not conditional and not skipped: db-password is in REQUIRED above, so control
-# only reaches here with a value in hand. The workdir file it was written to is
-# reused rather than the value being re-read, so the plaintext stays out of argv
-# and out of this script's variables (see the note on argv above).
+# db-password is in REQUIRED above, so control only reaches here with a value in
+# hand; the workdir file it was written to is reused rather than the value being
+# re-read, so the plaintext stays out of argv and out of this script's variables.
+#
+# But the SECOND namespace ($DB_NAMESPACE, default accretion-db) does not always
+# exist: a cloud install provisions Cloud SQL through Pulumi and creates no such
+# namespace, and `make secrets` passes no --db-namespace. Applying this Secret
+# there unconditionally used to fail `kubectl apply` AFTER accretion-api-secrets
+# had already been applied -- a half-applied set reported as failure, leaving the
+# operator guessing which Secrets exist (#146). So in apply mode it is included
+# only when the namespace exists, and otherwise SKIPPED LOUDLY by name rather than
+# applied-then-failed. In print mode there is no cluster to ask, so the full shape
+# is always emitted.
 db_manifest="$(kubectl create secret generic "$DB_SECRET_NAME" \
   --namespace "$DB_NAMESPACE" \
   --from-file="${DB_PASSWORD_KEY}=${workdir}/db-password" \
   --from-file="${DB_ADMIN_PASSWORD_KEY}=${workdir}/db-password" \
   --dry-run=client -o yaml)"
-manifest="$manifest
+if [ "$MODE" = "print" ] || kubectl get namespace "$DB_NAMESPACE" >/dev/null 2>&1; then
+  manifest="$manifest
 ---
 $db_manifest"
+else
+  echo "note: ${DB_SECRET_NAME} not created — namespace ${DB_NAMESPACE} does not exist." >&2
+  echo "      The database runs in its own namespace only on an in-cluster install (Tilt/kind);" >&2
+  echo "      a cloud install uses Cloud SQL and creates no ${DB_NAMESPACE} namespace. Pass" >&2
+  echo "      --db-namespace to target a different one, or create ${DB_NAMESPACE} first if you" >&2
+  echo "      do run the database in-cluster. The other Secrets were applied regardless." >&2
+fi
 
 # accretion-mcp-secrets, under the exact keys internal/mcp/secrets resolves.
 #
