@@ -41,10 +41,12 @@ literal on the other -- satisfies both independently while the two halves point 
 different passwords. The server then comes up on one password and the jobs
 authenticate with another, and nothing in any rendered manifest says why: each
 value is individually valid, only their disagreement is wrong. Refuse it here, by
-name. The two coherent shapes -- BOTH an existingSecret, or BOTH a literal -- pass;
-this rejects only the disagreement between them. (Two different existingSecret
-NAMES cannot be compared without cluster access, the same limit the existingSecret
-guards note.)
+name. The coherent shapes pass: BOTH an existingSecret (single source, the values
+not comparable at render -- the documented safe path), or BOTH a literal WITH THE
+SAME VALUE. Two DIFFERENT literals are not coherent -- they diverge exactly as a
+mixed shape does -- and are refused by the value-equality check below. (Two
+different existingSecret NAMES cannot be compared without cluster access, the same
+limit the existingSecret guards note.)
 */}}
 {{- $jobsExisting := .Values.config.database.existingSecret | default "" }}
 {{- $adminUsesSecret := ne $adminExisting "" }}
@@ -54,6 +56,21 @@ guards note.)
 {{- fail "SECURITY: mixed database password sources (#143). postgresql.auth.existingSecret is set, so the Postgres superuser is read from that Secret, while config.database.password is a literal that the schema job and the partition-maintenance cronjob use -- so the server and the jobs can hold DIFFERENT passwords, which values.yaml promises is impossible and the schema job fails authentication on at rollout. Point config.database.existingSecret at the SAME Secret (scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD under both postgres-password and db-password so one value feeds both), or supply both sides as literals -- do not mix a Secret with a literal." }}
 {{- else }}
 {{- fail "SECURITY: mixed database password sources (#143). config.database.existingSecret is set, so the schema job and the partition-maintenance cronjob read the password from that Secret, while postgresql.auth.postgresPassword is a literal that the Postgres superuser is initialised from -- so the server and the jobs can hold DIFFERENT passwords, which values.yaml promises is impossible and the schema job fails authentication on at rollout. Point postgresql.auth.existingSecret at the SAME Secret, or supply both sides as literals -- do not mix a Secret with a literal." }}
+{{- end }}
+{{- end }}
+{{/*
+Both sides literals: the single-source promise also requires the two literals to
+be EQUAL. Two different literals diverge exactly as a mixed shape does (the server
+initialised from postgresql.auth.postgresPassword, the jobs authenticating with
+config.database.password), and the source-type check above cannot see it. Compared
+only when the jobs literal is non-empty: an empty one is the no-password guard's
+job below, and comparing it here would pre-empt that with the wrong message. The
+admin literal is already non-empty and not "postgres" (the admin guard passed).
+*/}}
+{{- if and (not $adminUsesSecret) (not $jobsUsesSecret) }}
+{{- $jobsPw := .Values.config.database.password | default "" }}
+{{- if and (ne $jobsPw "") (ne $adminPw $jobsPw) }}
+{{- fail "SECURITY: divergent database password (#143). postgresql.auth.postgresPassword and config.database.password are both literals but hold DIFFERENT values, so the Postgres superuser is initialised with one while the schema job and the partition-maintenance cronjob authenticate with the other -- the exact silent rollout authentication failure the single-source promise in values.yaml (\"one variable feeds both ... they cannot disagree\") forbids. Give both sides the SAME literal, or point both at one existingSecret (scripts/make-secret.sh publishes ACCRETION_DATABASE_PASSWORD under both postgres-password and db-password so one value feeds both)." }}
 {{- end }}
 {{- end }}
 {{- end }}
