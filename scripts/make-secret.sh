@@ -93,6 +93,13 @@
 # Values are read from the env file, falling back to the process environment
 # (so direnv-exported values and CI both work). Empty values are skipped.
 #
+# That fallback applies ONLY to the default .env. An explicit --env-file is
+# AUTHORITATIVE: it is read without merging ambient values, so what the file
+# declares is exactly what the run sees. A flag named --env-file that quietly
+# unioned the caller's shell was the bug behind #138 -- a gate that built a
+# fixture env file and compared it still saw the developer's exported
+# ACCRETION_API_KEY_* and reported identities the fixture never declared.
+#
 # Per-client API keys used to be deliberately absent from here: the chart's
 # `apiKeys` list carried each plaintext and derived both halves from it, so they
 # could not drift. #122 ended that -- a working credential must not ship in a
@@ -141,6 +148,10 @@ NAMESPACE="${NAMESPACE:-accretion-core}"
 # cross a namespace -- the password therefore has to be published twice.
 DB_NAMESPACE="${DB_NAMESPACE:-accretion-db}"
 ENV_FILE=".env"
+# Whether --env-file was passed. An explicit file is authoritative (see the
+# header and resolve() below): it suppresses the process-environment fallback so
+# the file alone decides what the run sees. The default .env keeps the fallback.
+ENV_FILE_EXPLICIT=0
 MODE="apply"
 # The identity --print-identity-var was asked about. Empty in every other mode.
 IDENTITY_ARG=""
@@ -257,7 +268,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -n|--namespace) NAMESPACE="$2"; shift 2 ;;
     --db-namespace) DB_NAMESPACE="$2"; shift 2 ;;
-    -f|--env-file)  ENV_FILE="$2"; shift 2 ;;
+    -f|--env-file)  ENV_FILE="$2"; ENV_FILE_EXPLICIT=1; shift 2 ;;
     --dry-run)      MODE="print"; shift ;;
     --print-keys)   MODE="keys"; shift ;;
     --print-discord-keys) MODE="discord-keys"; shift ;;
@@ -367,7 +378,13 @@ resolve() {
   # expansion rather than `printenv` so this costs no fork: with 12 mapping rows
   # and a small .env most rows reach this line, and a fork each was the other
   # half of the per-run cost — reading the file once does not remove it.
-  [ -n "$value" ] || value="${!1:-}"
+  #
+  # Only for the default .env: an explicit --env-file is authoritative and must
+  # not union the ambient shell (#138), so the fallback is skipped for it and the
+  # file's absence of a value stays an absence.
+  if [ -z "$value" ] && [ "$ENV_FILE_EXPLICIT" -eq 0 ]; then
+    value="${!1:-}"
+  fi
   [ -n "$value" ] || return 0
   printf '%s' "$value"
 }
