@@ -292,10 +292,11 @@ fi
 # nothing else -- the fourth Secret the script owns and, until #147, the only one
 # whose keys no gate checked in either direction. Like --print-keys it reads no
 # value, so it is safe to run in a shell holding real credentials.
-# `make secrets-db-keys-check` diffs these against the keys the accretion-db
-# chart's rendered secretKeyRefs ask for, deploy/tilt.yaml's existingSecretKey,
-# and the Bitnami subchart's auth.secretKeys.adminPasswordKey -- the same
-# boundaries the other two --print-*-keys modes already police.
+# `make secrets-keys-check` diffs these (alongside accretion-api and -discord)
+# against the keys the accretion-db chart's rendered secretKeyRefs ask for,
+# deploy/tilt.yaml's existingSecretKey, and the Bitnami subchart's
+# auth.secretKeys.adminPasswordKey -- the same boundaries the other two
+# --print-*-keys modes already police.
 if [ "$MODE" = "db-keys" ]; then
   printf '%s\n' "$DB_PASSWORD_KEY" "$DB_ADMIN_PASSWORD_KEY"
   exit 0
