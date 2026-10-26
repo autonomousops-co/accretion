@@ -18,6 +18,11 @@ repos:
         exclude: ^pulumi/
       - id: go-test-mod
         exclude: ^pulumi/
+        # The full module test suite is ~45s and a comment-only commit cannot
+        # affect it, so run it at pre-push where it gates publishing rather than
+        # on every commit (#139). Follows the per-stage pinning already used for
+        # helm-chart-version-bump below.
+        stages: [pre-push]
       - id: go-vet-mod
         exclude: ^pulumi/
       - id: go-imports
