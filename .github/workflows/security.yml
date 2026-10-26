@@ -68,15 +68,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          set -euo pipefail
+          # Ensure the dedup label exists first: `gh issue create --label` errors
+          # on a missing label, which on the very first failure (no tracking
+          # issue yet) would make this job itself fail silently — the cron-blind
+          # failure mode #140 closes. `--force` upserts and never errors.
+          gh label create security-scan --color FF0000 \
+            --description "Scheduled security scan failure" --force
           title="Scheduled security scan is failing"
-          body="The weekly \`security\` workflow failed on its scheduled run.
+          # Heredoc at column 1: indented continuation lines would carry leading
+          # spaces into the body, which GitHub renders as a code block.
+          body=$(cat <<EOF
+          The weekly \`security\` workflow failed on its scheduled run.
 
           Run: $RUN_URL
 
           This is advisory (not a merge gate). A failure usually means a new
-          advisory landed against a dependency — triage and bump, see #140."
+          advisory landed against a dependency — triage and bump, see #140.
+          EOF
+          )
+          # Dedup on the label (now guaranteed), not the title: a reworded title
+          # would otherwise orphan the old issue and file a duplicate.
           existing=$(gh issue list --state open --label security-scan \
-            --search "$title in:title" --json number --jq '.[0].number')
+            --json number --jq '.[0].number')
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "$body"
           else
