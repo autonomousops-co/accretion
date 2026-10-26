@@ -1,6 +1,6 @@
 module accretion-infrastructure
 
-go 1.24
+go 1.26.10
 
 require (
 	github.com/pulumi/pulumi-gcp/sdk/v7 v7.14.0
