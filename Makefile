@@ -248,7 +248,12 @@ check-k8s: ## Check if Kubernetes is available and configured
 # CI verifies dependencies rather than updating them: the old chain began with
 # deps-update, whose `go get ./...` and `go mod tidy` rewrite the very files the
 # run is supposed to be checking, making the result non-reproducible.
-ci: deps-verify lint lint-new-selfcheck vet security charts-check tiltfile-check test build ## Run full CI pipeline
+#
+# CI enforces lint-new, not lint: golangci-lint's v2 upgrade (forced by Go 1.25)
+# brought ~ten versions of new checks whose pre-existing findings are deliberately
+# grandfathered via --new-from-rev. `lint` stays a target for anyone auditing that
+# backlog, but `make ci` runs lint-new so it passes exactly when GitHub does (#137).
+ci: deps-verify lint-new lint-new-selfcheck vet security charts-check tiltfile-check test build ## Run full CI pipeline
 	@echo "$(GREEN)CI pipeline completed successfully$(NC)"
 
 clean: ## Clean build artifacts
