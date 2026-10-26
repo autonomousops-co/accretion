@@ -1249,15 +1249,19 @@ secrets-keys-check: ## Verify make-secret.sh emits exactly the Secret keys the c
 		printf "%b\n" "  ok  accretion-db-secrets: the chart, Tilt and the subchart read exactly the 2 keys the script emits (via deploy/tilt.yaml existingSecretKey and the subchart adminPasswordKey)"; \
 		printf "%b\n" "$(GREEN)Secret keys match the charts, and env.example documents them$(NC)"'
 
-# A kubectl preflight shared by every gate that renders a Secret through
+# A kubectl preflight shared by the three gates that render a Secret through
 # `scripts/make-secret.sh --dry-run`. The script itself now refuses by name when
-# kubectl is absent (#153), but that message lands on the script's stderr, which
-# these gates capture to a temp file to inspect -- so without this preflight the
-# gate would still abort with a bare `make: *** Error 1`, naming nothing. Said
-# here, in make's own output, the failure names the missing tool. This is the
-# condition the non-required `charts` CI job hit: a runner with helm but not
-# kubectl, where secrets-stale-check (the first gate to shell out to the
-# dry-run) died messagelessly (#153).
+# kubectl is absent (#153), but secrets-stale-check captures the script's stderr
+# to a temp file under `set -e` and aborts before catting it -- so without this
+# preflight that gate would still die with a bare `make: *** Error 1`, naming
+# nothing. secrets-portability-check (`|| true`) and secrets-strength-check
+# (captures stderr into a shell var and re-prints it) would surface the script's
+# own kubectl message anyway; they are wired here for consistency, so a missing
+# tool fails identically across all three. Said in make's own output, the
+# failure names the missing tool. This is the condition the non-required
+# `charts` CI job hit: a runner with helm but not kubectl, where
+# secrets-stale-check (the first gate to shell out to the dry-run) died
+# messagelessly (#153).
 secrets-tooling-check:
 	@command -v kubectl >/dev/null 2>&1 || { \
 		printf "%b\n" "$(RED)kubectl is not on PATH, so the secrets gates cannot render a manifest to check against. 'kubectl create secret --dry-run=client' needs only the binary, not a cluster. Install it: https://kubernetes.io/docs/tasks/tools/$(NC)"; exit 1; }
