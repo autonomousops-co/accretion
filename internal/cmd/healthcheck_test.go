@@ -295,7 +295,10 @@ func TestHealthcheckBudgetCoversAllListenersNotEachRequest(t *testing.T) {
 	cfg.UI.Enabled = true
 	cfg.UI.Port = hangingServer(t)
 
-	budget := 600 * time.Millisecond
+	// Scaled well above scheduling noise: at 3s the failing threshold is 4.5s and
+	// the per-request regression signature is 6s, so a few hundred ms of delay
+	// under load is ~10% of the margin rather than the whole of it (#139).
+	budget := 3 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
