@@ -18,6 +18,21 @@ postgresql:
     # GENERATES a random one, which renders green and then authenticates none of
     # the clients -- accretion-api, the collectors, the schema job -- that hold
     # the password from somewhere else.
+    #
+    # BREAKING CHANGE for existing releases (#145). PostgreSQL honours
+    # POSTGRES_PASSWORD only on FIRST initialisation. Pointing this at an
+    # existingSecret therefore changes nothing in the data directory of a cluster
+    # whose Postgres PVC already exists: the server keeps the password the volume
+    # was initialised with while every client gets the new one, and accretion-api,
+    # the collectors and the schema Job all fail authentication. Two remedies,
+    # either works:
+    #   - set ACCRETION_DATABASE_PASSWORD to the password the volume was
+    #     initialised with (for a pre-#134 kind cluster that is `postgres`), so the
+    #     Secret carries what the server already expects; or
+    #   - recreate the volume so initdb runs again against the new Secret -- the
+    #     Tilt `reset-database` resource drops the PVC and reinitialises Postgres,
+    #     and now validates the render BEFORE deleting anything so a bad config
+    #     cannot wipe the volume and then fail.
     existingSecret: ""
     postgresPassword: ""
     database: "accretion"
