@@ -554,6 +554,21 @@ if [ "$MODE" = "identities" ]; then
   exit 0
 fi
 
+# Every path from here on renders a manifest with `kubectl create secret
+# --dry-run=client` (and the default mode then `kubectl apply`s it), so kubectl
+# is a hard requirement of the remaining modes -- but NOT of the --print-*
+# modes above, which exit before this line and must stay runnable without it.
+# Fail by name here rather than letting the first `kubectl` call die: that call
+# sits inside command substitution under `set -e`, so an absent binary aborts
+# the script with no message, which is exactly how the `charts` CI job failed
+# (#153) -- a bare `make: *** Error 1` with no clue that kubectl was missing.
+if ! command -v kubectl >/dev/null 2>&1; then
+  echo "error: kubectl is not on PATH, so the Secret manifests cannot be rendered." >&2
+  echo "  'kubectl create secret --dry-run=client' needs only the binary, not a cluster." >&2
+  echo "  Install kubectl: https://kubernetes.io/docs/tasks/tools/" >&2
+  exit 1
+fi
+
 args=()
 missing=()
 have_whitelist=0
