@@ -4,7 +4,7 @@
 	deploy-collector-preflight dev-cleanup dev-setup docker-build docker-build-cached docker-build-multiplatform env-file existing-secret-check fmt \
 	go-tools gofmt-check helm-deps helm-lint help init-project install-hooks install-mcp kind-down kind-up \
 	lint lint-new lint-new-selfcheck preflight preflight-gate rbac-check rbac-secrets-check redis-check release render-check require-env secrets secrets-check \
-	secrets-functional-check secrets-identity-check secrets-keys-check secrets-db-keys-check secrets-portability-check secrets-pulumi-check secrets-stale-check \
+	secrets-functional-check secrets-identity-check secrets-keys-check secrets-portability-check secrets-pulumi-check secrets-stale-check \
 	secrets-strength-check security setup-namespace size sizing-check test test-bench test-coverage \
 	test-functional tilt-down tilt-full tilt-server-only tilt-up tiltfile-check trace-ingest-check traces-check up \
 	values-check values-matrix-check vet
@@ -1030,7 +1030,7 @@ secrets: require-env ## Create/refresh Secrets in $(NAMESPACE) from .env (accret
 # env var unset, and the API 401s. Compare the keys the script emits against the
 # keys the chart's rendered secretKeyRefs actually ask for. (toYaml renders map
 # keys alphabetically, so the `key:` line precedes its `name:` line.)
-secrets-check: secrets-functional-check secrets-identity-check secrets-keys-check secrets-db-keys-check secrets-pulumi-check secrets-portability-check secrets-stale-check secrets-strength-check ## Run every make-secret.sh guard
+secrets-check: secrets-functional-check secrets-identity-check secrets-keys-check secrets-pulumi-check secrets-portability-check secrets-stale-check secrets-strength-check ## Run every make-secret.sh guard
 
 # test-functional used to default an unresolvable credential to the empty
 # string, so a missing key produced 401s that named nothing and a silently
@@ -1184,9 +1184,19 @@ secrets-identity-check: ## Verify each identity's hash is the digest of its plai
 # caching and the `local`-expansion note the original had learned. Two readers
 # of "one chart's subtree out of the central file" is the drift these gates
 # exist to prevent, so there is one, and that script's selfcheck already covers
-# it. The count-of-4 assertion is the other vacuity guard: a chart that stopped
-# reading a key would otherwise agree with a script that stopped emitting it.
-secrets-keys-check: ## Verify make-secret.sh emits exactly the Secret keys the charts read
+# it. The count assertions (4 for discord, 2 for accretion-db) are the other
+# vacuity guard: a chart that stopped reading a key would otherwise agree with a
+# script that stopped emitting it.
+#
+# THREE Secrets are checked the same way through the shared refs() helper:
+# accretion-api-secrets, accretion-discord-secrets, and accretion-db-secrets --
+# the last folded in here (was a separate secrets-db-keys-check) so there is one
+# reader of the subtree render and one refs() with its want/got vacuity assertion,
+# not a cloned, weaker copy. accretion-db-secrets is rendered from the same
+# deploy/tilt.yaml accretion-db subtree the Tiltfile passes, so the chart's
+# existingSecretKey, Tilt's copy of it, and the Bitnami subchart's
+# adminPasswordKey all flow through the one render and a rename on any shows up.
+secrets-keys-check: ## Verify make-secret.sh emits exactly the Secret keys the charts read (accretion-api, -discord, -db)
 	@echo "$(BLUE)Diffing script Secret keys against the charts' secretKeyRefs...$(NC)"
 	@bash -c 'set -eo pipefail; \
 		d=$$(mktemp -d); trap "rm -rf $$d" EXIT; \
@@ -1222,37 +1232,17 @@ secrets-keys-check: ## Verify make-secret.sh emits exactly the Secret keys the c
 		n=$$(wc -l < $$d/dchart | tr -d " "); \
 		[ "$$n" -eq 4 ] || fail "the bot reads $$n keys from accretion-discord-secrets, expected 4 (its own API key, the Discord token and the two model keys). A render that reads fewer is not proof of agreement, it is a chart that stopped asking."; \
 		printf "%b\n" "  ok  accretion-discord-secrets: the bot reads exactly the 4 keys the script emits"; \
-		printf "%b\n" "$(GREEN)Secret keys match the charts, and env.example documents them$(NC)"'
-
-# The FOURTH Secret make-secret.sh owns is accretion-db-secrets, and until #147 it
-# was the only one whose keys no gate checked in either direction -- a rename of
-# config.database.existingSecretKey in deploy/tilt.yaml, or of the Bitnami
-# subchart's auth.secretKeys.adminPasswordKey, left every gate green and failed the
-# schema job and the Postgres StatefulSet at rollout. This diffs --print-db-keys
-# against the keys the chart's rendered secretKeyRefs actually read, rendered with
-# the SAME deploy/tilt.yaml accretion-db subtree the Tiltfile passes -- so the
-# chart's existingSecretKey, Tilt's copy of it, and the subchart's adminPasswordKey
-# all flow through the one render and a rename on any of them shows up here.
-secrets-db-keys-check: ## Verify make-secret.sh emits exactly the accretion-db-secrets keys the chart, Tilt and the subchart read
-	@echo "$(BLUE)Diffing script accretion-db-secrets keys against the chart's secretKeyRefs...$(NC)"
-	@bash -c 'set -eo pipefail; \
-		d=$$(mktemp -d); trap "rm -rf $$d" EXIT; \
-		fail() { printf "%b\n" "$(RED)$$1$(NC)" >&2; exit 1; }; \
-		refs() { \
-			{ grep -B1 "name: $$2" "$$1"; grep -A1 "name: $$2" "$$1"; } \
-				| grep -oE "key: [a-z0-9-]+" | awk "{print \$$2}" | sort -u; \
-		}; \
-		bash scripts/make-secret.sh --print-db-keys | sort -u > $$d/script; \
-		bash scripts/check-values-matrix.sh --print-subtree deploy/tilt.yaml accretion-db > $$d/sub.json; \
-		helm template t ./charts/accretion-db -f $$d/sub.json > $$d/render.yaml; \
-		refs $$d/render.yaml accretion-db-secrets > $$d/chart; \
-		n=$$(wc -l < $$d/chart | tr -d " "); \
-		[ "$$n" -eq 2 ] || fail "accretion-db-secrets is read with $$n distinct keys in the render, expected 2 (postgres-password for the Postgres StatefulSet via the Bitnami subchart, db-password for the schema job and the partition cronjob). A render that reads fewer is a chart that stopped asking, not agreement."; \
-		if ! diff -u $$d/chart $$d/script; then \
+		bash scripts/make-secret.sh --print-db-keys | sort -u > $$d/dbscript; \
+		bash scripts/check-values-matrix.sh --print-subtree deploy/tilt.yaml accretion-db > $$d/dbvalues.json; \
+		helm template t ./charts/accretion-db -f $$d/dbvalues.json > $$d/db.yaml; \
+		refs $$d/db.yaml accretion-db-secrets > $$d/dbchart; \
+		if ! diff -u $$d/dbchart $$d/dbscript; then \
 			fail "accretion-db-secrets key mismatch: < the chart, Tilt and the subchart read via secretKeyRef, > the script emits. A rename on either side (config.database.existingSecretKey, deploy/tilt.yaml, the Bitnami auth.secretKeys.adminPasswordKey, or DB_PASSWORD_KEY / DB_ADMIN_PASSWORD_KEY) fails the schema job and the StatefulSet at rollout with nothing pointing back here."; \
 		fi; \
-		printf "%b\n" "  ok  accretion-db-secrets: the chart reads exactly the $$n keys the script emits (via deploy/tilt.yaml existingSecretKey and the subchart adminPasswordKey)"; \
-		printf "%b\n" "$(GREEN)accretion-db-secrets keys match the chart, Tilt and the subchart$(NC)"'
+		n=$$(wc -l < $$d/dbchart | tr -d " "); \
+		[ "$$n" -eq 2 ] || fail "accretion-db-secrets is read with $$n distinct keys in the render, expected 2 (postgres-password for the Postgres StatefulSet via the Bitnami subchart, db-password for the schema job and the partition cronjob). A render that reads fewer is a chart that stopped asking, not agreement."; \
+		printf "%b\n" "  ok  accretion-db-secrets: the chart, Tilt and the subchart read exactly the 2 keys the script emits (via deploy/tilt.yaml existingSecretKey and the subchart adminPasswordKey)"; \
+		printf "%b\n" "$(GREEN)Secret keys match the charts, and env.example documents them$(NC)"'
 
 # The declare -A regression (#54): macOS ships bash 3.2 as /bin/bash and Tilt
 # invokes the script as `bash scripts/make-secret.sh`, bypassing the shebang.
