@@ -70,6 +70,15 @@ COLLECTOR_VALUES ?=
 # and override this. Named so that a grep for it in a cluster finds nothing and
 # a reader who sees it in a diff does not go looking for where it is stored.
 DB_PASSWORD_RENDER := --set-string config.database.password=render-only-not-a-credential
+# The database password SOURCE for the real `make deploy-collector` path (#144),
+# as opposed to the gate stub above. deploy-collector and its preflight point the
+# chart at the operator-provisioned Secret -- exactly as deploy/tilt.yaml and
+# deploy/pulumi.yaml do -- rather than a --set-string literal that `helm get
+# values` would expose afterwards. `make secrets` builds accretion-api-secrets
+# with the db-password key both the api and collector charts read; the collector
+# chart's own existingSecretKey default is "password", so the key is named
+# explicitly here for the same reason deploy/tilt.yaml names it.
+COLLECTOR_DB_SECRET := --set config.database.existingSecret=accretion-api-secrets --set-string config.database.existingSecretKey=db-password
 # Database TLS for the collector deploy path.
 #
 # charts/accretion-collector/values-{staging,prod}.yaml carried
@@ -286,6 +295,14 @@ deploy-collector-preflight: ## Validate the collector deploy inputs without depl
 # rendered and the resulting mode is checked. That also catches a
 # COLLECTOR_VALUES that does not render, before anything reaches a cluster.
 #
+# No DB_PASSWORD_RENDER stub is passed here (#144). helm ranks --set above -f
+# whatever the order, so a stub would override an operator file's own
+# config.database.password and validate a render the deploy will not produce --
+# the same "--set-string ONLY when the operator supplied no file" rule the deploy
+# body obeys. The operator file is authoritative: it supplies its own password
+# source (a literal or, as deploy/tilt.yaml does, an existingSecret), and a file
+# that supplies none fails the chart's guard here, before the cluster.
+#
 # The allowlist is deliberately the same three values values-check enforces on
 # the rendered output: before this the gate refused `prefer` while the deploy
 # path passed it straight through, so the two disagreed about what counts as
@@ -293,7 +310,7 @@ deploy-collector-preflight: ## Validate the collector deploy inputs without depl
 # has no TLS.
 	@set -e; \
 	if [ -n "$(COLLECTOR_VALUES)" ]; then \
-		out=$$(helm template preflight ./charts/accretion-collector $(DB_PASSWORD_RENDER) $(COLLECTOR_VALUES) 2>&1) || { \
+		out=$$(helm template preflight ./charts/accretion-collector $(COLLECTOR_VALUES) 2>&1) || { \
 			printf "%b\n" "$(RED)COLLECTOR_VALUES does not render, so this deploy would fail after touching the cluster:$(NC)" >&2; \
 			printf "%s\n" "$$out" >&2; exit 1; }; \
 		mode=$$(printf "%s\n" "$$out" | grep -m1 "sslmode:" | sed "s/.*sslmode: *//;s/\"//g"); \
@@ -341,7 +358,7 @@ deploy-collector: deploy-collector-preflight ## Deploy accretion-collector (incl
 # and deploy-collector-preflight validates whichever one that is.
 	helm upgrade --install accretion-collector ./charts/accretion-collector \
 		--namespace $(NAMESPACE) \
-		$(if $(COLLECTOR_VALUES),$(COLLECTOR_VALUES),--set-string config.database.sslmode=$(DB_SSLMODE))
+		$(if $(COLLECTOR_VALUES),$(COLLECTOR_VALUES),$(COLLECTOR_DB_SECRET) --set-string config.database.sslmode=$(DB_SSLMODE))
 	@echo "$(GREEN)Deployed accretion-collector$(NC)"
 
 deploy-status: ## Show deployment status of all components
