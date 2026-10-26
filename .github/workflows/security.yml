@@ -48,6 +48,41 @@ jobs:
         run: go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
       - run: make security
 
+  # Surface scheduled-run failures loudly. On a private repo the weekly cron
+  # has no reviewer watching the Actions tab, which is exactly how govulncheck
+  # stayed red for five weeks unnoticed (#140). A required status check would
+  # instead block unrelated PRs whenever the vuln database flags an untouched
+  # dependency, so this stays advisory on PRs and only raises an alarm on the
+  # schedule: it files (or refreshes) a single tracking issue rather than
+  # gating merges. Runs only for `schedule`, only when a scan job failed.
+  notify-scheduled-failure:
+    name: notify on scheduled failure
+    needs: [vulncheck, gosec]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: open or refresh tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Scheduled security scan is failing"
+          body="The weekly \`security\` workflow failed on its scheduled run.
+
+          Run: $RUN_URL
+
+          This is advisory (not a merge gate). A failure usually means a new
+          advisory landed against a dependency — triage and bump, see #140."
+          existing=$(gh issue list --state open --label security-scan \
+            --search "$title in:title" --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --label security-scan --body "$body"
+          fi
+
   # CodeQL is disabled until this repository is public.
   #
   # Code scanning requires GitHub Code Security, which on a private repository
