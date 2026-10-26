@@ -51,9 +51,10 @@ Cross-namespace wiring: workers and the API reach Postgres at
   `security.enforceStrongDbPassword`, which only prod turned on, so dev and staging rendered with a
   checked-in `postgres` by design and that flag is now gone — so each refuses to render again until
   the application database password is a real one (`--set-string config.database.password=...`, or a
-  `config.database.existingSecret`), and a third time until `postgresql.auth.postgresPassword` is
-  too — that last only while the bundled PostgreSQL subchart is enabled, as those files leave it, so
-  `--set postgresql.enabled=false` for an external database skips it. The refusals are raised one at
+  `config.database.existingSecret`). The `accretion-api` chart no longer has a second,
+  `postgresql.auth.postgresPassword` refusal: #134's review removed that guard here, because the
+  chart stands up no PostgreSQL of its own (the key fed a check on a component that is not there).
+  The refusals are raised one at
   a time and each names its own remedy, so supplying the identities alone gets you the next error
   rather than a render. `values-dev.yaml` and `values-example.yaml` do render as-is, and not because
   they carry a password: both name `config.database.existingSecret: accretion-api-secrets`, the
