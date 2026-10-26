@@ -70,6 +70,15 @@ COLLECTOR_VALUES ?=
 # and override this. Named so that a grep for it in a cluster finds nothing and
 # a reader who sees it in a diff does not go looking for where it is stored.
 DB_PASSWORD_RENDER := --set-string config.database.password=render-only-not-a-credential
+# The database password SOURCE for the real `make deploy-collector` path (#144),
+# as opposed to the gate stub above. deploy-collector and its preflight point the
+# chart at the operator-provisioned Secret -- exactly as deploy/tilt.yaml and
+# deploy/pulumi.yaml do -- rather than a --set-string literal that `helm get
+# values` would expose afterwards. `make secrets` builds accretion-api-secrets
+# with the db-password key both the api and collector charts read; the collector
+# chart's own existingSecretKey default is "password", so the key is named
+# explicitly here for the same reason deploy/tilt.yaml names it.
+COLLECTOR_DB_SECRET := --set config.database.existingSecret=accretion-api-secrets --set-string config.database.existingSecretKey=db-password
 # Database TLS for the collector deploy path.
 #
 # charts/accretion-collector/values-{staging,prod}.yaml carried
@@ -286,6 +295,14 @@ deploy-collector-preflight: ## Validate the collector deploy inputs without depl
 # rendered and the resulting mode is checked. That also catches a
 # COLLECTOR_VALUES that does not render, before anything reaches a cluster.
 #
+# No DB_PASSWORD_RENDER stub is passed here (#144). helm ranks --set above -f
+# whatever the order, so a stub would override an operator file's own
+# config.database.password and validate a render the deploy will not produce --
+# the same "--set-string ONLY when the operator supplied no file" rule the deploy
+# body obeys. The operator file is authoritative: it supplies its own password
+# source (a literal or, as deploy/tilt.yaml does, an existingSecret), and a file
+# that supplies none fails the chart's guard here, before the cluster.
+#
 # The allowlist is deliberately the same three values values-check enforces on
 # the rendered output: before this the gate refused `prefer` while the deploy
 # path passed it straight through, so the two disagreed about what counts as
@@ -293,7 +310,7 @@ deploy-collector-preflight: ## Validate the collector deploy inputs without depl
 # has no TLS.
 	@set -e; \
 	if [ -n "$(COLLECTOR_VALUES)" ]; then \
-		out=$$(helm template preflight ./charts/accretion-collector $(DB_PASSWORD_RENDER) $(COLLECTOR_VALUES) 2>&1) || { \
+		out=$$(helm template preflight ./charts/accretion-collector $(COLLECTOR_VALUES) 2>&1) || { \
 			printf "%b\n" "$(RED)COLLECTOR_VALUES does not render, so this deploy would fail after touching the cluster:$(NC)" >&2; \
 			printf "%s\n" "$$out" >&2; exit 1; }; \
 		mode=$$(printf "%s\n" "$$out" | grep -m1 "sslmode:" | sed "s/.*sslmode: *//;s/\"//g"); \
@@ -341,7 +358,7 @@ deploy-collector: deploy-collector-preflight ## Deploy accretion-collector (incl
 # and deploy-collector-preflight validates whichever one that is.
 	helm upgrade --install accretion-collector ./charts/accretion-collector \
 		--namespace $(NAMESPACE) \
-		$(if $(COLLECTOR_VALUES),$(COLLECTOR_VALUES),--set-string config.database.sslmode=$(DB_SSLMODE))
+		$(if $(COLLECTOR_VALUES),$(COLLECTOR_VALUES),$(COLLECTOR_DB_SECRET) --set-string config.database.sslmode=$(DB_SSLMODE))
 	@echo "$(GREEN)Deployed accretion-collector$(NC)"
 
 deploy-status: ## Show deployment status of all components
@@ -819,15 +836,15 @@ credential-plaintext-check: ## Verify no credential renders into a ConfigMap, a 
 			fi; \
 		}; \
 		render api-values ./charts/accretion-api -f charts/accretion-api/values.yaml \
-			--set-string config.database.password=$$sentinel --set-string postgresql.auth.postgresPassword=$$sentinel --set-json "$$apikeys"; \
+			--set-string config.database.password=$$sentinel --set-json "$$apikeys"; \
 		render api-example ./charts/accretion-api -f charts/accretion-api/values-example.yaml \
-			--set-string config.database.password=$$sentinel --set-string postgresql.auth.postgresPassword=$$sentinel; \
+			--set-string config.database.password=$$sentinel; \
 		render api-dev ./charts/accretion-api -f charts/accretion-api/values-dev.yaml \
-			--set-string config.database.password=$$sentinel --set-string postgresql.auth.postgresPassword=$$sentinel --set-json "$$apikeys"; \
+			--set-string config.database.password=$$sentinel --set-json "$$apikeys"; \
 		render api-staging ./charts/accretion-api -f charts/accretion-api/values-staging.yaml \
-			--set-string config.database.password=$$sentinel --set-string postgresql.auth.postgresPassword=$$sentinel --set-json "$$apikeys"; \
+			--set-string config.database.password=$$sentinel --set-json "$$apikeys"; \
 		render api-prod ./charts/accretion-api -f charts/accretion-api/values-prod.yaml \
-			--set-string config.database.password=$$sentinel --set-string postgresql.auth.postgresPassword=$$sentinel --set-json "$$apikeys"; \
+			--set-string config.database.password=$$sentinel --set-json "$$apikeys"; \
 		render collector-default ./charts/accretion-collector \
 			--set-string config.database.password=$$sentinel --set-string redis.auth.password=$$sentinel; \
 		render collector-scaled ./charts/accretion-collector $(COLLECTOR_SCALED) \
@@ -935,15 +952,15 @@ rbac-secrets-check: ## Verify no ServiceAccount in any chart holds a verb on sec
 			fi; \
 		}; \
 		render api-values ./charts/accretion-api -f charts/accretion-api/values.yaml \
-			--set-string config.database.password=x --set-string postgresql.auth.postgresPassword=x --set-json "$$apikeys"; \
+			--set-string config.database.password=x --set-json "$$apikeys"; \
 		render api-dev ./charts/accretion-api -f charts/accretion-api/values-dev.yaml \
-			--set-string config.database.password=x --set-string postgresql.auth.postgresPassword=x --set-json "$$apikeys"; \
+			--set-string config.database.password=x --set-json "$$apikeys"; \
 		render api-staging ./charts/accretion-api -f charts/accretion-api/values-staging.yaml \
-			--set-string config.database.password=x --set-string postgresql.auth.postgresPassword=x --set-json "$$apikeys"; \
+			--set-string config.database.password=x --set-json "$$apikeys"; \
 		render api-prod ./charts/accretion-api -f charts/accretion-api/values-prod.yaml \
-			--set-string config.database.password=x --set-string postgresql.auth.postgresPassword=x --set-json "$$apikeys"; \
+			--set-string config.database.password=x --set-json "$$apikeys"; \
 		render api-example ./charts/accretion-api -f charts/accretion-api/values-example.yaml \
-			--set-string config.database.password=x --set-string postgresql.auth.postgresPassword=x; \
+			--set-string config.database.password=x; \
 		render collector-default ./charts/accretion-collector $(DB_PASSWORD_RENDER); \
 		render collector-scaled ./charts/accretion-collector $(DB_PASSWORD_RENDER) $(COLLECTOR_SCALED); \
 		render discord-enabled ./charts/accretion-discord --set enabled=true --set-string secret.botToken=x --set rbac.create=true \
@@ -997,12 +1014,17 @@ require-env: ## Verify a local .env (secrets) exists — prerequisite for run/ti
 		exit 1; \
 	fi
 
-secrets: require-env ## Create/refresh accretion-api-secrets and accretion-mcp-secrets in $(NAMESPACE) from .env
+secrets: require-env ## Create/refresh Secrets in $(NAMESPACE) from .env (accretion-api, accretion-mcp, accretion-discord; accretion-db in its own namespace when that namespace exists)
 	@echo "$(BLUE)Verifying API-key identities against .env...$(NC)"
 	@bash scripts/check-api-key-hashes.sh $(IDENTITIES_FILE)
 	@echo "$(BLUE)Syncing Secrets into $(NAMESPACE)...$(NC)"
+# make-secret.sh also publishes accretion-db-secrets into the database's own
+# namespace (default accretion-db), but only when it exists -- a cloud install on
+# Cloud SQL has no such namespace, so the script skips it by name rather than
+# half-applying and failing (#146). accretion-mcp-secrets and accretion-discord-secrets
+# are each skipped loudly when .env sets none of their keys.
 	bash scripts/make-secret.sh --namespace $(NAMESPACE)
-	@echo "$(GREEN)accretion-api-secrets and accretion-mcp-secrets synced$(NC)"
+	@echo "$(GREEN)Secrets synced (accretion-api-secrets, plus accretion-mcp/-discord and accretion-db when applicable)$(NC)"
 
 # The failure this guards against is silent: every mismatched key just leaves an
 # env var unset, and the API 401s. Compare the keys the script emits against the
@@ -1162,9 +1184,19 @@ secrets-identity-check: ## Verify each identity's hash is the digest of its plai
 # caching and the `local`-expansion note the original had learned. Two readers
 # of "one chart's subtree out of the central file" is the drift these gates
 # exist to prevent, so there is one, and that script's selfcheck already covers
-# it. The count-of-4 assertion is the other vacuity guard: a chart that stopped
-# reading a key would otherwise agree with a script that stopped emitting it.
-secrets-keys-check: ## Verify make-secret.sh emits exactly the Secret keys the charts read
+# it. The count assertions (4 for discord, 2 for accretion-db) are the other
+# vacuity guard: a chart that stopped reading a key would otherwise agree with a
+# script that stopped emitting it.
+#
+# THREE Secrets are checked the same way through the shared refs() helper:
+# accretion-api-secrets, accretion-discord-secrets, and accretion-db-secrets --
+# the last folded in here (was a separate secrets-db-keys-check) so there is one
+# reader of the subtree render and one refs() with its want/got vacuity assertion,
+# not a cloned, weaker copy. accretion-db-secrets is rendered from the same
+# deploy/tilt.yaml accretion-db subtree the Tiltfile passes, so the chart's
+# existingSecretKey, Tilt's copy of it, and the Bitnami subchart's
+# adminPasswordKey all flow through the one render and a rename on any shows up.
+secrets-keys-check: ## Verify make-secret.sh emits exactly the Secret keys the charts read (accretion-api, -discord, -db)
 	@echo "$(BLUE)Diffing script Secret keys against the charts' secretKeyRefs...$(NC)"
 	@bash -c 'set -eo pipefail; \
 		d=$$(mktemp -d); trap "rm -rf $$d" EXIT; \
@@ -1200,6 +1232,16 @@ secrets-keys-check: ## Verify make-secret.sh emits exactly the Secret keys the c
 		n=$$(wc -l < $$d/dchart | tr -d " "); \
 		[ "$$n" -eq 4 ] || fail "the bot reads $$n keys from accretion-discord-secrets, expected 4 (its own API key, the Discord token and the two model keys). A render that reads fewer is not proof of agreement, it is a chart that stopped asking."; \
 		printf "%b\n" "  ok  accretion-discord-secrets: the bot reads exactly the 4 keys the script emits"; \
+		bash scripts/make-secret.sh --print-db-keys | sort -u > $$d/dbscript; \
+		bash scripts/check-values-matrix.sh --print-subtree deploy/tilt.yaml accretion-db > $$d/dbvalues.json; \
+		helm template t ./charts/accretion-db -f $$d/dbvalues.json > $$d/db.yaml; \
+		refs $$d/db.yaml accretion-db-secrets > $$d/dbchart; \
+		if ! diff -u $$d/dbchart $$d/dbscript; then \
+			fail "accretion-db-secrets key mismatch: < the chart, Tilt and the subchart read via secretKeyRef, > the script emits. A rename on either side (config.database.existingSecretKey, deploy/tilt.yaml, the Bitnami auth.secretKeys.adminPasswordKey, or DB_PASSWORD_KEY / DB_ADMIN_PASSWORD_KEY) fails the schema job and the StatefulSet at rollout with nothing pointing back here."; \
+		fi; \
+		n=$$(wc -l < $$d/dbchart | tr -d " "); \
+		[ "$$n" -eq 2 ] || fail "accretion-db-secrets is read with $$n distinct keys in the render, expected 2 (postgres-password for the Postgres StatefulSet via the Bitnami subchart, db-password for the schema job and the partition cronjob). A render that reads fewer is a chart that stopped asking, not agreement."; \
+		printf "%b\n" "  ok  accretion-db-secrets: the chart, Tilt and the subchart read exactly the 2 keys the script emits (via deploy/tilt.yaml existingSecretKey and the subchart adminPasswordKey)"; \
 		printf "%b\n" "$(GREEN)Secret keys match the charts, and env.example documents them$(NC)"'
 
 # The declare -A regression (#54): macOS ships bash 3.2 as /bin/bash and Tilt
@@ -1330,8 +1372,9 @@ secrets-stale-check: ## Verify make-secret.sh warns about bare pre-rename LLM ke
 		if grep -q "$$sentinel" $$d/out $$d/err; then \
 			printf "%b\n" "$(RED)stale-name warning leaked the variable VALUE$(NC)"; exit 1; \
 		fi; \
-		awk "{ print }" $$d/out | sed -nE "s/^  [a-zA-Z0-9_.-]+: (.*)\$$/\1/p" | tr -d "\"" \
-			| while read -r b64; do printf "%s" "$$b64" | base64 -d 2>/dev/null || true; printf "\n"; done > $$d/decoded; \
+		sed -nE "s/^  [a-zA-Z0-9_.-]+: (.*)\$$/\1/p" $$d/out | tr -d "\"" \
+			| while read -r b64; do printf "%s" "$$b64" | base64 -d 2>/dev/null; printf "\n"; done > $$d/decoded; \
+		[ -s $$d/decoded ] || { printf "%b\n" "$(RED)the base64-decode assertion decoded NOTHING: either base64 -d is unavailable or the sed pattern stopped matching the Secret data lines (a kubectl output-format change, or a key name outside [a-zA-Z0-9_.-]). The grep below would then find nothing and report success while testing nothing.$(NC)"; exit 1; }; \
 		if grep -q "$$sentinel" $$d/decoded; then \
 			printf "%b\n" "$(RED)a stale bare name reached the Secret: the sentinel is absent from the raw output but present once the data values are base64-DECODED. The plaintext grep above cannot see that, which is exactly the shape a leak would take in a manifest whose values are all encoded.$(NC)"; exit 1; \
 		fi; \
@@ -1778,7 +1821,7 @@ values-check: ## Verify checked-in values ship no plaintext API keys and no unen
 		printf "%b\n" "  ok  charts/accretion-api/values-example.yaml (own apiKeys)"; \
 		for f in charts/accretion-api/values-staging.yaml charts/accretion-api/values-prod.yaml; do \
 			helm template t ./charts/accretion-api -f $$f $$guard $$stub \
-				--set-string config.database.password=x --set-string postgresql.auth.postgresPassword=y >/dev/null; \
+				--set-string config.database.password=x >/dev/null; \
 			printf "%b\n" "  ok  $$f"; \
 		done; \
 		helm template t ./charts/accretion-api -f charts/accretion-api/values-dev.yaml $$guard $$stub >/dev/null; \
@@ -1821,7 +1864,7 @@ values-check: ## Verify checked-in values ship no plaintext API keys and no unen
 		stub="--set-json apiKeys=[{\"name\":\"ci\",\"hash\":\"$(ZERO_DIGEST)\",\"permissions\":[\"read:memory\"]}]"; \
 		for e in staging prod; do \
 			helm template t ./charts/accretion-api -f charts/accretion-api/values-$$e.yaml $$stub \
-				--set-string config.database.password=x --set-string postgresql.auth.postgresPassword=y > $$d/api-$$e.yaml; \
+				--set-string config.database.password=x > $$d/api-$$e.yaml; \
 			check_sslmodes "$$d/api-$$e.yaml" "$$e" || exit 1; \
 			mode=$$($(MAKE) -n deploy-collector STACK=$$e 2>/dev/null | sed -n "s/.*set-string config.database.sslmode=\([a-z-]*\).*/\1/p" | head -1); \
 			[ -n "$$mode" ] || { printf "%b\n" "$(RED)make deploy-collector STACK=$$e passes no sslmode at all — the setting the per-environment files used to carry is gone again$(NC)"; exit 1; }; \
@@ -1839,8 +1882,8 @@ values-check: ## Verify checked-in values ship no plaintext API keys and no unen
 		$(MAKE) deploy-collector-preflight STACK=dev DB_SSLMODE=disable >/dev/null 2>&1 \
 			|| { printf "%b\n" "$(RED)deploy-collector refuses cleartext for STACK=dev, where a local Postgres has no TLS$(NC)"; exit 1; }; \
 		printf "%b\n" "  ok  deploy-collector refuses an unencrypted or unknown DB_SSLMODE outside dev/test, and accepts its own default"; \
-		printf "%s\n" "config:" "  database:" "    sslmode: \"verify-full\"" > $$d/op-strong.yaml; \
-		printf "%s\n" "config:" "  database:" "    sslmode: \"disable\"" > $$d/op-weak.yaml; \
+		printf "%s\n" "config:" "  database:" "    sslmode: \"verify-full\"" "    existingSecret: accretion-api-secrets" "    existingSecretKey: db-password" > $$d/op-strong.yaml; \
+		printf "%s\n" "config:" "  database:" "    sslmode: \"disable\"" "    existingSecret: accretion-api-secrets" "    existingSecretKey: db-password" > $$d/op-weak.yaml; \
 		if $(MAKE) -n deploy-collector STACK=prod COLLECTOR_VALUES="-f $$d/op-strong.yaml" 2>/dev/null | grep -q "set-string config.database.sslmode"; then \
 			printf "%b\n" "$(RED)deploy-collector passes its own --set-string alongside an operator values file. helm ranks --set above -f whatever the order, so an operator who asked for verify-full would be silently downgraded to the target default — a guard meant to raise a floor imposing a ceiling instead.$(NC)"; exit 1; \
 		fi; \
@@ -1849,7 +1892,7 @@ values-check: ## Verify checked-in values ship no plaintext API keys and no unen
 		if $(MAKE) deploy-collector-preflight STACK=prod COLLECTOR_VALUES="-f $$d/op-weak.yaml" >/dev/null 2>&1; then \
 			printf "%b\n" "$(RED)deploy-collector accepted an operator file asking for cleartext on STACK=prod — with a values file supplied the target passes no --set-string, so this file IS the deployed mode and nothing else would catch it$(NC)"; exit 1; \
 		fi; \
-		printf "%s\n" "config:" "  database:" "    sslmode: \"requrie\"" > $$d/op-typo.yaml; \
+		printf "%s\n" "config:" "  database:" "    sslmode: \"requrie\"" "    existingSecret: accretion-api-secrets" "    existingSecretKey: db-password" > $$d/op-typo.yaml; \
 		if $(MAKE) deploy-collector-preflight STACK=dev COLLECTOR_VALUES="-f $$d/op-typo.yaml" >/dev/null 2>&1; then \
 			printf "%b\n" "$(RED)deploy-collector accepted sslmode=requrie from an operator values file. The loose stage — is this a PostgreSQL sslmode at all — is only reaching DB_SSLMODE, not the mode that actually gets used, so a typo reaches the cluster on any stack the tight allowlist does not cover.$(NC)"; exit 1; \
 		fi; \

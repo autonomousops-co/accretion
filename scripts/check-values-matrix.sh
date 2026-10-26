@@ -95,6 +95,16 @@ PLACEHOLDER=values-matrix-placeholder
 DB_PASSWORD_STUB='--set-string config.database.password=render-only-not-a-credential'
 PG_PASSWORD_STUB='--set-string postgresql.auth.postgresPassword=render-only-not-a-credential'
 
+# The password SOURCE the real `make deploy-collector` passes (#144/#147), not a
+# stub. deploy-collector points the chart at the operator's accretion-db-secrets
+# (through accretion-api-secrets/db-password) exactly as deploy/tilt.yaml does, so
+# the make-deploy collector rows below transcribe THAT rather than a --set
+# password. They carried $DB_PASSWORD_STUB until #147, which the target does not
+# pass -- a row no longer describing its caller -- and the stub rendered them green
+# over #144's breakage, which is the inverse of what this gate is for. These two
+# flags mirror the Makefile's COLLECTOR_DB_SECRET and must change with it.
+COLLECTOR_DB_SECRET='--set config.database.existingSecret=accretion-api-secrets --set-string config.database.existingSecretKey=db-password'
+
 # The Tiltfile's central values file (#119). Every static setting Tilt used to
 # pass as an inline --set flag lives there, nested by chart name, and the
 # Tiltfile materialises each chart's subtree at load.
@@ -138,7 +148,10 @@ TILT_VALUES=deploy/tilt.yaml
 #
 # The collector rows carry no values file because #123 deleted its
 # per-environment ones; `make deploy-collector` now installs the chart defaults
-# unless the operator passes COLLECTOR_VALUES. The second row is the scaled
+# unless the operator passes COLLECTOR_VALUES. They do name the database Secret
+# the target points the chart at ($COLLECTOR_DB_SECRET), because that is the
+# password source the real caller passes (#144) -- not a stub the caller lacks.
+# The second row is the scaled
 # shape, which is a materially different render -- it brings up the controller,
 # Redis and the Redis queue mode -- so it is worth a row of its own. It splits
 # log and metric because that is what a scaled collector actually deploys; the
@@ -182,8 +195,8 @@ default|otel-collector|-|1|
 make-deploy-dev|accretion-api|-|1|-f charts/accretion-api/values-dev.yaml $IDENTITY_STUB
 make-deploy-staging|accretion-api|-|1|-f charts/accretion-api/values-staging.yaml $IDENTITY_STUB --set-string config.database.password=$PLACEHOLDER
 make-deploy-prod|accretion-api|-|1|-f charts/accretion-api/values-prod.yaml $IDENTITY_STUB --set-string config.database.password=$PLACEHOLDER
-make-deploy|accretion-collector|-|1|$DB_PASSWORD_STUB
-make-deploy-scaled|accretion-collector|-|1|$DB_PASSWORD_STUB --set dataCollector.replicaCount=2 --set dataCollector.kinds.log.split=true --set dataCollector.kinds.metric.split=true --set-string redis.auth.password=render-only-not-a-credential
+make-deploy|accretion-collector|-|1|$COLLECTOR_DB_SECRET
+make-deploy-scaled|accretion-collector|-|1|$COLLECTOR_DB_SECRET --set dataCollector.replicaCount=2 --set dataCollector.kinds.log.split=true --set dataCollector.kinds.metric.split=true --set-string redis.auth.password=render-only-not-a-credential
 tilt|accretion-api|Tiltfile|1|@subtree-from:$TILT_VALUES:accretion-api $IDENTITY_STUB
 tilt|accretion-collector|Tiltfile|1|@subtree-from:$TILT_VALUES:accretion-collector --set config.k8s.namespaces={default,accretion-db}
 tilt|accretion-db|Tiltfile|1|@subtree-from:$TILT_VALUES:accretion-db
