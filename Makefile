@@ -1355,6 +1355,14 @@ secrets-pulumi-check: ## Verify pulumi provisions every Secret key make-secret.s
 # decode closes that: a stale name whose value reached the Secret is now caught
 # in the form it would actually appear in.
 #
+# The decode extraction is scoped to the `data:` block (`/^data:$/,/^[^ ]/`)
+# rather than every two-space-indented `key: value` line (#153). The broad form
+# also matched the `metadata:` block's `name:`/`namespace:` lines, whose values
+# (e.g. `accretion-api-secrets`) are not base64. GNU `base64 -d` (Linux/CI)
+# rejects non-base64 input with a non-zero exit; under `set -eo pipefail` that
+# killed this gate with a messageless `make: *** Error 1`. BSD `base64` (macOS)
+# tolerates the junk and returns 0, so it passed locally and failed only in CI.
+#
 # The fixture carries ACCRETION_DATABASE_PASSWORD since #134 for the same reason
 # values-check's renders carry one: db-password joined the script's REQUIRED
 # list, and that check runs before the warning this gate is about, so a fixture
@@ -1377,7 +1385,7 @@ secrets-stale-check: ## Verify make-secret.sh warns about bare pre-rename LLM ke
 		if grep -q "$$sentinel" $$d/out $$d/err; then \
 			printf "%b\n" "$(RED)stale-name warning leaked the variable VALUE$(NC)"; exit 1; \
 		fi; \
-		sed -nE "s/^  [a-zA-Z0-9_.-]+: (.*)\$$/\1/p" $$d/out | tr -d "\"" \
+		sed -nE "/^data:\$$/,/^[^ ]/{s/^  [a-zA-Z0-9_.-]+: (.*)\$$/\1/p;}" $$d/out | tr -d "\"" \
 			| while read -r b64; do printf "%s" "$$b64" | base64 -d 2>/dev/null; printf "\n"; done > $$d/decoded; \
 		[ -s $$d/decoded ] || { printf "%b\n" "$(RED)the base64-decode assertion decoded NOTHING: either base64 -d is unavailable or the sed pattern stopped matching the Secret data lines (a kubectl output-format change, or a key name outside [a-zA-Z0-9_.-]). The grep below would then find nothing and report success while testing nothing.$(NC)"; exit 1; }; \
 		if grep -q "$$sentinel" $$d/decoded; then \
