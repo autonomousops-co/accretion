@@ -5,7 +5,7 @@
 	go-tools gofmt-check helm-deps helm-lint help init-project install-hooks install-mcp kind-down kind-up \
 	lint lint-new lint-new-selfcheck preflight preflight-gate rbac-check rbac-secrets-check redis-check release render-check require-env secrets secrets-check \
 	secrets-functional-check secrets-identity-check secrets-keys-check secrets-portability-check secrets-pulumi-check secrets-stale-check \
-	secrets-strength-check secrets-tooling-check security setup-namespace size sizing-check test test-bench test-coverage \
+	secrets-strength-check security setup-namespace size sizing-check test test-bench test-coverage \
 	test-functional tilt-down tilt-full tilt-server-only tilt-up tiltfile-check trace-ingest-check traces-check up \
 	values-check values-matrix-check vet
 
@@ -1249,30 +1249,13 @@ secrets-keys-check: ## Verify make-secret.sh emits exactly the Secret keys the c
 		printf "%b\n" "  ok  accretion-db-secrets: the chart, Tilt and the subchart read exactly the 2 keys the script emits (via deploy/tilt.yaml existingSecretKey and the subchart adminPasswordKey)"; \
 		printf "%b\n" "$(GREEN)Secret keys match the charts, and env.example documents them$(NC)"'
 
-# A kubectl preflight shared by the three gates that render a Secret through
-# `scripts/make-secret.sh --dry-run`. The script itself now refuses by name when
-# kubectl is absent (#153), but secrets-stale-check captures the script's stderr
-# to a temp file under `set -e` and aborts before catting it -- so without this
-# preflight that gate would still die with a bare `make: *** Error 1`, naming
-# nothing. secrets-portability-check (`|| true`) and secrets-strength-check
-# (captures stderr into a shell var and re-prints it) would surface the script's
-# own kubectl message anyway; they are wired here for consistency, so a missing
-# tool fails identically across all three. Said in make's own output, the
-# failure names the missing tool. This is the condition the non-required
-# `charts` CI job hit: a runner with helm but not kubectl, where
-# secrets-stale-check (the first gate to shell out to the dry-run) died
-# messagelessly (#153).
-secrets-tooling-check:
-	@command -v kubectl >/dev/null 2>&1 || { \
-		printf "%b\n" "$(RED)kubectl is not on PATH, so the secrets gates cannot render a manifest to check against. 'kubectl create secret --dry-run=client' needs only the binary, not a cluster. Install it: https://kubernetes.io/docs/tasks/tools/$(NC)"; exit 1; }
-
 # The declare -A regression (#54): macOS ships bash 3.2 as /bin/bash and Tilt
 # invokes the script as `bash scripts/make-secret.sh`, bypassing the shebang.
 # --print-keys exits before the code that broke, so this drives the full path
 # via the missing-required branch and asserts the script's own error surfaces
 # rather than a bash syntax error. env -i so a developer's exported keys cannot
 # satisfy the check being made to fail.
-secrets-portability-check: secrets-tooling-check ## Verify make-secret.sh runs under /bin/bash 3.2 (macOS, Tilt)
+secrets-portability-check: ## Verify make-secret.sh runs under /bin/bash 3.2 (macOS, Tilt)
 	@echo "$(BLUE)Running make-secret.sh under /bin/bash...$(NC)"
 	@bash -c 'out=$$(env -i PATH="$$PATH" /bin/bash scripts/make-secret.sh --env-file /dev/null --dry-run 2>&1 || true); \
 		case "$$out" in \
@@ -1372,11 +1355,19 @@ secrets-pulumi-check: ## Verify pulumi provisions every Secret key make-secret.s
 # decode closes that: a stale name whose value reached the Secret is now caught
 # in the form it would actually appear in.
 #
+# The decode extraction is scoped to the `data:` block (`/^data:$/,/^[^ ]/`)
+# rather than every two-space-indented `key: value` line (#153). The broad form
+# also matched the `metadata:` block's `name:`/`namespace:` lines, whose values
+# (e.g. `accretion-api-secrets`) are not base64. GNU `base64 -d` (Linux/CI)
+# rejects non-base64 input with a non-zero exit; under `set -eo pipefail` that
+# killed this gate with a messageless `make: *** Error 1`. BSD `base64` (macOS)
+# tolerates the junk and returns 0, so it passed locally and failed only in CI.
+#
 # The fixture carries ACCRETION_DATABASE_PASSWORD since #134 for the same reason
 # values-check's renders carry one: db-password joined the script's REQUIRED
 # list, and that check runs before the warning this gate is about, so a fixture
 # without it would exit 1 on a missing key and never reach the code under test.
-secrets-stale-check: secrets-tooling-check ## Verify make-secret.sh warns about bare pre-rename LLM key names (#56)
+secrets-stale-check: ## Verify make-secret.sh warns about bare pre-rename LLM key names (#56)
 	@echo "$(BLUE)Checking the stale bare-env-name warning...$(NC)"
 	@bash -c 'set -eo pipefail; \
 		d=$$(mktemp -d); trap "rm -rf $$d" EXIT; \
@@ -1394,7 +1385,7 @@ secrets-stale-check: secrets-tooling-check ## Verify make-secret.sh warns about 
 		if grep -q "$$sentinel" $$d/out $$d/err; then \
 			printf "%b\n" "$(RED)stale-name warning leaked the variable VALUE$(NC)"; exit 1; \
 		fi; \
-		sed -nE "s/^  [a-zA-Z0-9_.-]+: (.*)\$$/\1/p" $$d/out | tr -d "\"" \
+		sed -nE "/^data:\$$/,/^[^ ]/{s/^  [a-zA-Z0-9_.-]+: (.*)\$$/\1/p;}" $$d/out | tr -d "\"" \
 			| while read -r b64; do printf "%s" "$$b64" | base64 -d 2>/dev/null; printf "\n"; done > $$d/decoded; \
 		[ -s $$d/decoded ] || { printf "%b\n" "$(RED)the base64-decode assertion decoded NOTHING: either base64 -d is unavailable or the sed pattern stopped matching the Secret data lines (a kubectl output-format change, or a key name outside [a-zA-Z0-9_.-]). The grep below would then find nothing and report success while testing nothing.$(NC)"; exit 1; }; \
 		if grep -q "$$sentinel" $$d/decoded; then \
@@ -1429,7 +1420,7 @@ secrets-stale-check: secrets-tooling-check ## Verify make-secret.sh warns about 
 # argument, and an escape inside an argument is never interpreted -- putting the
 # line there writes a literal backslash-n into the env file, which parses as one
 # unusable variable name and leaves the whitelist unset too.
-secrets-strength-check: secrets-tooling-check ## Verify make-secret.sh rejects a weak or non-hex session key (#64)
+secrets-strength-check: ## Verify make-secret.sh rejects a weak or non-hex session key (#64)
 	@echo "$(BLUE)Checking the session-key strength guard...$(NC)"
 	@bash -c 'set -eo pipefail; \
 		d=$$(mktemp -d); trap "rm -rf $$d" EXIT; \

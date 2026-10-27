@@ -81,12 +81,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
-      # scripts/make-secret.sh --dry-run renders every Secret with
-      # `kubectl create secret --dry-run=client`, and secrets-stale-check (the
-      # first chart gate to shell out to it) dies with a messageless `set -e`
-      # abort when the binary is absent — a fresh runner has helm but not
-      # kubectl (#153). The dry-run needs only the binary, no cluster/context.
-      - uses: azure/setup-kubectl@v4
       # accretion-db pulls in the Bitnami postgres subchart, and a fresh runner
       # has no repositories configured — this passes locally only because a
       # developer's machine already has bitnami added.
