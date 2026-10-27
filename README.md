@@ -3,12 +3,12 @@
 <!-- TOC -->
 * [What it is](#what-it-is)
 * [What it remembers](#what-it-remembers)
+* [How it works](#how-it-works)
 * [Quick Start (local)](#quick-start-local)
   * [Run the stack](#run-the-stack)
   * [Connect an agent](#connect-an-agent)
   * [Watch your own namespace](#watch-your-own-namespace)
 * [Connect an agent (MCP)](#connect-an-agent-mcp)
-* [How it works](#how-it-works)
 * [Components](#components)
 * [TLS](#tls)
 * [API keys](#api-keys)
@@ -125,6 +125,24 @@ flowchart LR
     APISVR --> BOT
     BOT --> AGENT
 ```
+
+- **Capture** — three collector processes turn cluster signals into records: `data-collector`
+  (log, metric, event), a split-out `trace-collector` (the OTLP receiver), and `status` (object
+  state). Logs and metrics are dispatched per-pod by a controller that watches Pods via a
+  client-go informer — in-process at one replica, through Redis under scale-out; events are
+  gathered by a self-scheduling poller; resource-status snapshots and configmap/secret changes
+  arrive from client-go informers as they happen; traces arrive at the built-in OTLP receiver. Every
+  collector embeds each record synchronously (via the configured LLM's embedding model) and inserts
+  it. See [internal/worker](internal/worker/README.md).
+- **Store** — one `unified_entries` table, `PARTITION BY RANGE (timestamp)` into weekly children,
+  with an HNSW cosine index on the embedding and a GIN index on the JSONB. See
+  [internal/database](internal/database/README.md).
+- **Recall** — an agent asks a natural-language question; it's embedded, the nearest records above a
+  similarity threshold are retrieved (optionally within a time window the model extracts from the
+  question), and that context is fed to a chat model — classic single-shot RAG. Agents connect over
+  MCP; humans use Discord, or the optional web UI (`ui.enabled`, off by default).
+  See [internal/mcp](internal/mcp/README.md) and
+  [internal/llm](internal/llm/README.md).
 
 ## Quick Start (local)
 
@@ -390,26 +408,6 @@ printf '%s\n%s\n%s\n' \
 
 A missing `ACCRETION_API_URL` exits 1 with a message on stderr — the usual cause of a client showing
 the server as "failed to start".
-
----
-
-- **Capture** — three collector processes turn cluster signals into records: `data-collector`
-  (log, metric, event), a split-out `trace-collector` (the OTLP receiver), and `status` (object
-  state). Logs and metrics are dispatched per-pod by a controller that watches Pods via a
-  client-go informer — in-process at one replica, through Redis under scale-out; events are
-  gathered by a self-scheduling poller; resource-status snapshots and configmap/secret changes
-  arrive from client-go informers as they happen; traces arrive at the built-in OTLP receiver. Every
-  collector embeds each record synchronously (via the configured LLM's embedding model) and inserts
-  it. See [internal/worker](internal/worker/README.md).
-- **Store** — one `unified_entries` table, `PARTITION BY RANGE (timestamp)` into weekly children,
-  with an HNSW cosine index on the embedding and a GIN index on the JSONB. See
-  [internal/database](internal/database/README.md).
-- **Recall** — an agent asks a natural-language question; it's embedded, the nearest records above a
-  similarity threshold are retrieved (optionally within a time window the model extracts from the
-  question), and that context is fed to a chat model — classic single-shot RAG. Agents connect over
-  MCP; humans use Discord, or the optional web UI (`ui.enabled`, off by default).
-  See [internal/mcp](internal/mcp/README.md) and
-  [internal/llm](internal/llm/README.md).
 
 ## Components
 
@@ -736,13 +734,17 @@ the `--from-literal` list yourself. `scripts/make-secret.sh --print-keys` lists 
 `--dry-run` prints the manifest without applying it, and [API keys](#api-keys) explains why a
 key-name mismatch fails silently.
 
-It emits **up to three** Secrets, one per consumer: `accretion-api-secrets` (the server's own key
-material), `accretion-mcp-secrets` (the MCP client's credential, plus a pointer to the API's CA) and
-`accretion-discord-secrets` (the bot's own credential for `accretion-api`). A consumer whose key is
-unset in `.env` is **skipped**, with a note on stderr naming the Secret, the variable and what will
-fail without it — so following the table in [Run the stack](#run-the-stack), which leaves the
-Discord key optional, you get two. What is *not* in any of them is the server's side of an API key:
-that is the SHA-256 `hash` in the chart's `apiKeys` values list, and
+It emits **up to four** Secrets: `accretion-api-secrets` (the server's own key material, including
+the database password since #134), `accretion-db-secrets` (that same password in the `accretion-db`
+namespace, for the database and its Jobs), `accretion-mcp-secrets` (the MCP client's credential,
+plus a pointer to the API's CA) and `accretion-discord-secrets` (the bot's own credential for
+`accretion-api`). `accretion-db-secrets` is created only when the `accretion-db` namespace already
+exists — which it does here, because you created it above — otherwise the script prints a note and
+skips it. A consumer whose key is unset in `.env` is **skipped**, with a note on stderr naming the
+Secret, the variable and what will fail without it — so following the table in
+[Run the stack](#run-the-stack), which leaves the Discord key optional, you get the three
+non-Discord Secrets. What is *not* in any of them is the server's side of an API key: that is the
+SHA-256 `hash` in the chart's `apiKeys` values list, and
 `scripts/make-secret.sh --print-identities` prints the block your `.env` implies.
 
 **2. Database (PostgreSQL + pgvector + schema).** The chart pulls in the Bitnami PostgreSQL
@@ -751,17 +753,13 @@ indexes:
 
 The chart carries **no password of its own**. It shipped `postgres` for both the superuser and its
 own schema Job until #134 — a working credential in a public repository — and now refuses to render
-with neither a password nor a Secret named. Create the Secret first; both keys hold the same value,
-because two readers name it differently (`postgres-password` is what the Bitnami subchart's
-`auth.secretKeys.adminPasswordKey` reads, `db-password` is what the schema Job and the partition
-CronJob read through `secretKeyRef`):
+with neither a password nor a Secret named. Step 1 already published `accretion-db-secrets` in the
+`accretion-db` namespace, holding that password under both keys two readers name it differently
+(`postgres-password` is what the Bitnami subchart's `auth.secretKeys.adminPasswordKey` reads,
+`db-password` is what the schema Job and the partition CronJob read through `secretKeyRef`), so just
+point the chart at it:
 
 ```bash
-kubectl create namespace accretion-db
-kubectl create secret generic accretion-db-secrets -n accretion-db \
-  --from-literal=postgres-password=<db-password> \
-  --from-literal=db-password=<db-password>
-
 helm dependency build ./charts/accretion-db
 helm upgrade --install accretion-db ./charts/accretion-db \
   --namespace accretion-db \
@@ -908,7 +906,7 @@ enabled, but none of it is deployed unless you ask.
 | Off by default | What it is | Turn it on with |
 | --- | --- | --- |
 | Collector controller + Redis | Shards work across scaled collectors | `--set dataCollector.replicaCount=3` (any scale-out) |
-| Discord bot | One of three front ends | `--set enabled=true` plus a Secret holding its token ([below](#5-optional-discord-bot)) |
+| Discord bot | One of three front ends | `--set enabled=true` plus a Secret holding its token (step 5 of [Quick Start (cluster deployment)](#quick-start-cluster-deployment)) |
 | Grafana | Dashboards | `--set grafana.enabled=true` (needs a backend below) |
 | Loki | Log storage for Grafana | `--set loki.enabled=true --set-json 'config.service.pipelines.logs.exporters=["debug","otlphttp/loki"]'` |
 | Prometheus | Metric storage for Grafana | `--set prometheus.enabled=true --set-json 'config.service.pipelines.metrics.exporters=["debug","prometheus"]'` |
