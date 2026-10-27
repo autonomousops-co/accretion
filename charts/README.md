@@ -62,10 +62,11 @@ Cross-namespace wiring: workers and the API reach Postgres at
   `ACCRETION_DATABASE_PASSWORD` in your gitignored `.env`. `values-example.yaml` additionally
   carries its own identity, whose all-zeros digest has no preimage, so an unmodified example install
   authenticates nobody.
-- Secrets (`ACCRETION_LLM_OPENAI_API_KEY`, `ACCRETION_LLM_ANTHROPIC_API_KEY`, Discord token, OAuth,
-  session key) come from a Kubernetes Secret (`accretion-api-secrets`), created by
-  [`scripts/make-secret.sh`](../scripts/make-secret.sh) — the one mapping from `.env`'s SHELL_CASE
-  names to the chart's dashed Secret keys.
+- Secrets (`ACCRETION_LLM_OPENAI_API_KEY`, OAuth, session key) come from a Kubernetes Secret
+  (`accretion-api-secrets`), created by [`scripts/make-secret.sh`](../scripts/make-secret.sh) — the
+  one mapping from `.env`'s SHELL_CASE names to the chart's dashed Secret keys. Of the two model
+  keys only the OpenAI one reaches the API server here: `ACCRETION_LLM_ANTHROPIC_API_KEY` and the
+  Discord token are published to `accretion-discord-secrets`, not `accretion-api-secrets`.
 - **Supplying the password as a Helm value is the escape hatch, not the path.** Every guard below
   points here rather than advertising it, because the three charts name one remedy and this file
   carries the caveat once. `--set-string config.database.password=<value>` (and
