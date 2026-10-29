@@ -8,12 +8,24 @@ REG_NAME="kind-registry"
 REG_PORT="5001"
 KIND_CONFIG="kind-config.yaml"
 
-# 1. Start a local registry container (if not already running)
-if [ "$(docker inspect -f '{{.State.Running}}' "${REG_NAME}" 2>/dev/null || true)" != 'true' ]; then
+# 1. Ensure a local registry is available on REG_PORT. Reuse whatever is already
+#    there instead of failing on a name clash (stopped container) or a port clash
+#    (a registry someone else already started on this port).
+if [ "$(docker inspect -f '{{.State.Running}}' "${REG_NAME}" 2>/dev/null || true)" = 'true' ]; then
+  echo "Registry ${REG_NAME} already running."
+elif docker inspect "${REG_NAME}" >/dev/null 2>&1; then
+  # Container exists but is stopped: start it rather than recreating (a fresh
+  # `docker run --name ${REG_NAME}` would fail with "name already in use").
+  echo "Starting existing registry container ${REG_NAME}..."
+  docker start "${REG_NAME}" >/dev/null
+elif [ -n "$(docker ps --quiet --filter "publish=${REG_PORT}")" ]; then
+  # A different container already publishes REG_PORT: reuse it, and adopt its
+  # name so the containerd and kind-network steps below target the right one.
+  REG_NAME="$(docker ps --format '{{.Names}}' --filter "publish=${REG_PORT}" | head -n1)"
+  echo "Reusing existing registry '${REG_NAME}' already bound to port ${REG_PORT}."
+else
   echo "Starting local registry on port ${REG_PORT}..."
   docker run -d --restart=always -p "127.0.0.1:${REG_PORT}:5000" --network bridge --name "${REG_NAME}" registry:2
-else
-  echo "Registry ${REG_NAME} already running."
 fi
 
 # 2. Create the Kind cluster
