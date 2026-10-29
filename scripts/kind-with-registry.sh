@@ -8,12 +8,34 @@ REG_NAME="kind-registry"
 REG_PORT="5001"
 KIND_CONFIG="kind-config.yaml"
 
-# 1. Start a local registry container (if not already running)
-if [ "$(docker inspect -f '{{.State.Running}}' "${REG_NAME}" 2>/dev/null || true)" != 'true' ]; then
+# 1. Ensure a local registry is available on REG_PORT. Reuse whatever is already
+#    there instead of failing on a name clash (stopped container) or a port clash
+#    (a registry someone else already started on this port).
+if [ "$(docker inspect -f '{{.State.Running}}' "${REG_NAME}" 2>/dev/null || true)" = 'true' ]; then
+  echo "Registry ${REG_NAME} already running."
+elif docker inspect "${REG_NAME}" >/dev/null 2>&1; then
+  # Container exists but is stopped: start it rather than recreating (a fresh
+  # `docker run --name ${REG_NAME}` would fail with "name already in use").
+  echo "Starting existing registry container ${REG_NAME}..."
+  docker start "${REG_NAME}" >/dev/null
+elif [ -n "$(docker ps --quiet --filter "publish=${REG_PORT}")" ]; then
+  # A different container already publishes REG_PORT. Only adopt it if it is a
+  # registry image -- otherwise fail loudly rather than wiring a non-registry
+  # container into containerd as if it could serve images.
+  found_name="$(docker ps --format '{{.Names}}' --filter "publish=${REG_PORT}" | head -n1)"
+  found_image="$(docker inspect -f '{{.Config.Image}}' "${found_name}" 2>/dev/null || true)"
+  if printf '%s' "${found_image}" | grep -qiE '(^|/)registry(:|$)'; then
+    REG_NAME="${found_name}"
+    echo "Reusing existing registry '${REG_NAME}' (${found_image}) already bound to port ${REG_PORT}."
+  else
+    echo "ERROR: port ${REG_PORT} is already in use by container '${found_name}'" >&2
+    echo "       (image '${found_image}'), which is not a Docker registry." >&2
+    echo "       Free the port or start a registry there, then re-run." >&2
+    exit 1
+  fi
+else
   echo "Starting local registry on port ${REG_PORT}..."
   docker run -d --restart=always -p "127.0.0.1:${REG_PORT}:5000" --network bridge --name "${REG_NAME}" registry:2
-else
-  echo "Registry ${REG_NAME} already running."
 fi
 
 # 2. Create the Kind cluster
